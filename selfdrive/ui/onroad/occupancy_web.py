@@ -88,7 +88,8 @@ _HTML_PAGE = r"""<!DOCTYPE html>
     backdrop-filter: blur(4px); min-width: 180px;
   }
   #imu-panel .label { color: #888; }
-  #imu-panel .val { color: #0ff; font-weight: bold; }
+  #imu-panel .axis { color: #888; margin-right: 2px; }
+  #imu-panel .val { color: #0ff; font-weight: bold; margin-right: 8px; }
   canvas { display: block; width: 100vw; height: 100vh; }
   #status { position: absolute; bottom: 12px; right: 16px; font-size: 11px; color: #666; z-index: 10; }
 </style>
@@ -99,8 +100,10 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   <div id="info">connecting…</div>
 </div>
 <div id="imu-panel">
-  <div><span class="label">gyro:</span> <span class="val" id="gyro-val">—</span></div>
-  <div><span class="label">accel:</span> <span class="val" id="accel-val">—</span></div>
+  <div class="label">gyro (rad/s)</div>
+  <div><span class="axis">X</span><span class="val" id="gx">—</span> <span class="axis">Y</span><span class="val" id="gy">—</span> <span class="axis">Z</span><span class="val" id="gz">—</span></div>
+  <div class="label" style="margin-top:4px">accel (m/s²)</div>
+  <div><span class="axis">X</span><span class="val" id="ax">—</span> <span class="axis">Y</span><span class="val" id="ay">—</span> <span class="axis">Z</span><span class="val" id="az">—</span></div>
 </div>
 <div id="status"></div>
 <canvas id="c"></canvas>
@@ -123,19 +126,27 @@ let lastDRTime = null;
 let gravX = 0, gravY = 0, gravZ = 9.81;
 let gravInit = false;
 
+// Gyro high-pass state (removes slow bias drift)
+let hpGz = 0, prevRawGz = 0, hpInit = false;
+
 function updateDeadReckoning(gyro, accel) {
   const now = performance.now() / 1000;
-  if (lastDRTime === null) { lastDRTime = now; return; }
+  if (lastDRTime === null) { lastDRTime = now; prevRawGz = gyro[2]; hpInit = true; return; }
   const dt = Math.min(now - lastDRTime, 0.5);
   lastDRTime = now;
   if (dt < 0.001) return;
 
-  // Heading from gyro Z (yaw rate)
-  drHeading += gyro[2] * dt;
+  // High-pass filter on gyro Z to remove bias drift
+  const hpAlpha = 0.98;
+  const rawGz = gyro[2];
+  hpGz = hpAlpha * (hpGz + rawGz - prevRawGz);
+  prevRawGz = rawGz;
+  // Gate small rotations (sensor noise)
+  const gz = Math.abs(hpGz) > 0.01 ? hpGz : 0;
+  drHeading += gz * dt;
 
   // Estimate gravity via low-pass filter on raw accel
-  // (accurate when device is mostly stationary or moving at constant velocity)
-  const gAlpha = gravInit ? 0.01 : 0.5;  // fast init, then slow tracking
+  const gAlpha = gravInit ? 0.005 : 0.5;  // very slow tracking once initialised
   gravX += gAlpha * (accel[0] - gravX);
   gravY += gAlpha * (accel[1] - gravY);
   gravZ += gAlpha * (accel[2] - gravZ);
@@ -145,30 +156,35 @@ function updateDeadReckoning(gyro, accel) {
   let lax = accel[0] - gravX;
   let lay = accel[1] - gravY;
 
-  // Noise gate: ignore tiny accelerations (sensor noise)
+  // Aggressive noise gate: ignore accelerations below threshold
   const linMag = Math.sqrt(lax * lax + lay * lay);
-  if (linMag < 0.15) { lax = 0; lay = 0; }
+  if (linMag < 0.4) { lax = 0; lay = 0; }
 
   // Rotate to world frame by current heading
   const ch = Math.cos(drHeading), sh = Math.sin(drHeading);
   const wax = lax * ch - lay * sh;
   const way = lax * sh + lay * ch;
 
-  // Integrate velocity with strong decay (ZUPT-like damping)
-  const decay = Math.exp(-3.0 * dt);
+  // Integrate velocity with very strong decay
+  const decay = Math.exp(-10.0 * dt);
   drVx = drVx * decay + wax * dt;
   drVy = drVy * decay + way * dt;
 
-  // Zero velocity when speed is negligible
+  // ZUPT: zero velocity when speed is negligible
   const speed = Math.sqrt(drVx * drVx + drVy * drVy);
-  if (speed < 0.01) { drVx = 0; drVy = 0; }
+  if (speed < 0.02) { drVx = 0; drVy = 0; }
 
   // Integrate position
   drX += drVx * dt;
   drY += drVy * dt;
 
-  drPath.push({x: drX, y: drY});
-  if (drPath.length > 4000) drPath = drPath.slice(-4000);
+  // Only record point if we actually moved
+  const lastPt = drPath[drPath.length - 1];
+  const moved = Math.sqrt((drX - lastPt.x) ** 2 + (drY - lastPt.y) ** 2);
+  if (moved > 0.005) {
+    drPath.push({x: drX, y: drY});
+    if (drPath.length > 4000) drPath = drPath.slice(-4000);
+  }
 }
 
 function resize() {
@@ -442,10 +458,12 @@ async function fetchData() {
 
     const g = imu.gyro;
     const a = imu.accel;
-    document.getElementById('gyro-val').textContent =
-      g[0].toFixed(2) + ' ' + g[1].toFixed(2) + ' ' + g[2].toFixed(2);
-    document.getElementById('accel-val').textContent =
-      a[0].toFixed(1) + ' ' + a[1].toFixed(1) + ' ' + a[2].toFixed(1);
+    document.getElementById('gx').textContent = g[0].toFixed(3);
+    document.getElementById('gy').textContent = g[1].toFixed(3);
+    document.getElementById('gz').textContent = g[2].toFixed(3);
+    document.getElementById('ax').textContent = a[0].toFixed(2);
+    document.getElementById('ay').textContent = a[1].toFixed(2);
+    document.getElementById('az').textContent = a[2].toFixed(2);
 
     const cols = depthData ? depthData.closest.length : 0;
     info.innerHTML = 'columns: <b>' + cols + '</b>';
