@@ -122,43 +122,68 @@ let drX = 0, drY = 0;      // world-frame position (m)
 let drVx = 0, drVy = 0;    // world-frame velocity (m/s)
 let drPath = [{x:0, y:0}]; // accumulated trail
 let lastDRTime = null;
-// Gravity estimator: running average of accel (converges to gravity when stationary)
-let gravX = 0, gravY = 0, gravZ = 9.81;
-let gravInit = false;
+
+// Gravity calibration: collect samples before integrating
+const GRAV_CAL_SAMPLES = 30;  // ~4.5 s at 150 ms poll
+let gravCalBuf = [];           // [{x,y,z}, ...]
+let gravX = 0, gravY = 0, gravZ = 0;
+let gravCalibrated = false;
+
+// Gyro bias calibration (same window)
+let gyroBiasBuf = [];
+let gyroBiasX = 0, gyroBiasY = 0, gyroBiasZ = 0;
 
 // Gyro high-pass state (removes slow bias drift)
-let hpGz = 0, prevRawGz = 0, hpInit = false;
+let hpGz = 0, prevRawGz = 0;
 
 function updateDeadReckoning(gyro, accel) {
   const now = performance.now() / 1000;
-  if (lastDRTime === null) { lastDRTime = now; prevRawGz = gyro[2]; hpInit = true; return; }
+  if (lastDRTime === null) { lastDRTime = now; prevRawGz = gyro[2]; return; }
   const dt = Math.min(now - lastDRTime, 0.5);
   lastDRTime = now;
   if (dt < 0.001) return;
 
-  // High-pass filter on gyro Z to remove bias drift
+  // ── Calibration phase: accumulate gravity + gyro bias ──
+  if (!gravCalibrated) {
+    gravCalBuf.push({x: accel[0], y: accel[1], z: accel[2]});
+    gyroBiasBuf.push({x: gyro[0], y: gyro[1], z: gyro[2]});
+    if (gravCalBuf.length >= GRAV_CAL_SAMPLES) {
+      gravX = gravCalBuf.reduce((s, v) => s + v.x, 0) / gravCalBuf.length;
+      gravY = gravCalBuf.reduce((s, v) => s + v.y, 0) / gravCalBuf.length;
+      gravZ = gravCalBuf.reduce((s, v) => s + v.z, 0) / gravCalBuf.length;
+      gyroBiasX = gyroBiasBuf.reduce((s, v) => s + v.x, 0) / gyroBiasBuf.length;
+      gyroBiasY = gyroBiasBuf.reduce((s, v) => s + v.y, 0) / gyroBiasBuf.length;
+      gyroBiasZ = gyroBiasBuf.reduce((s, v) => s + v.z, 0) / gyroBiasBuf.length;
+      gravCalibrated = true;
+      prevRawGz = gyro[2] - gyroBiasZ;
+    }
+    return;
+  }
+
+  // ── Heading from bias-corrected, high-pass-filtered gyro Z ──
+  const rawGz = gyro[2] - gyroBiasZ;
   const hpAlpha = 0.98;
-  const rawGz = gyro[2];
   hpGz = hpAlpha * (hpGz + rawGz - prevRawGz);
   prevRawGz = rawGz;
-  // Gate small rotations (sensor noise)
-  const gz = Math.abs(hpGz) > 0.01 ? hpGz : 0;
+  const gz = Math.abs(hpGz) > 0.008 ? hpGz : 0;
   drHeading += gz * dt;
 
-  // Estimate gravity via low-pass filter on raw accel
-  const gAlpha = gravInit ? 0.005 : 0.5;  // very slow tracking once initialised
-  gravX += gAlpha * (accel[0] - gravX);
-  gravY += gAlpha * (accel[1] - gravY);
-  gravZ += gAlpha * (accel[2] - gravZ);
-  gravInit = true;
-
-  // Linear acceleration = raw - gravity estimate
+  // ── Linear acceleration (raw minus calibrated gravity) ──
   let lax = accel[0] - gravX;
   let lay = accel[1] - gravY;
 
-  // Aggressive noise gate: ignore accelerations below threshold
+  // Slowly track gravity drift (very conservative)
+  gravX += 0.002 * (accel[0] - gravX);
+  gravY += 0.002 * (accel[1] - gravY);
+  gravZ += 0.002 * (accel[2] - gravZ);
+
+  // Stationary check: if total accel magnitude is close to 1g, device isn't moving
+  const totalAccel = Math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2);
+  const isStationary = Math.abs(totalAccel - 9.81) < 0.3;
+
+  // Noise gate
   const linMag = Math.sqrt(lax * lax + lay * lay);
-  if (linMag < 0.4) { lax = 0; lay = 0; }
+  if (linMag < 0.5 || isStationary) { lax = 0; lay = 0; }
 
   // Rotate to world frame by current heading
   const ch = Math.cos(drHeading), sh = Math.sin(drHeading);
@@ -172,7 +197,7 @@ function updateDeadReckoning(gyro, accel) {
 
   // ZUPT: zero velocity when speed is negligible
   const speed = Math.sqrt(drVx * drVx + drVy * drVy);
-  if (speed < 0.02) { drVx = 0; drVy = 0; }
+  if (speed < 0.02 || isStationary) { drVx = 0; drVy = 0; }
 
   // Integrate position
   drX += drVx * dt;
