@@ -4,6 +4,10 @@ import pyray as rl
 from enum import IntEnum
 from collections.abc import Callable
 
+# Debug: write marker when this module is imported
+with open('/tmp/device_py_loaded', 'w') as _f:
+  _f.write('depth-v2')
+
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.time_helpers import system_time_valid
@@ -330,6 +334,22 @@ class DeviceLayoutMici(NavScroller):
     driver_cam_btn.set_click_callback(lambda: gui_app.push_widget(DriverCameraDialog()))
     driver_cam_btn.set_enabled(lambda: ui_state.is_offroad())
 
+    def _open_depth_camera():
+      import traceback as _tb
+      try:
+        from openpilot.selfdrive.ui.onroad.depth_camera_dialog import DepthCameraDialog
+        dlg = DepthCameraDialog()
+        gui_app.push_widget(dlg)
+      except Exception as _e:
+        with open('/tmp/depth_crash.log', 'w') as _f:
+          _f.write(_tb.format_exc())
+        from openpilot.common.swaglog import cloudlog
+        cloudlog.exception('depth: failed to open dialog')
+
+    depth_cam_btn = BigButton("depth\ncamera", "", gui_app.texture("icons_mici/settings/device/cameras.png", 64, 64))
+    depth_cam_btn.set_click_callback(_open_depth_camera)
+    depth_cam_btn.set_enabled(lambda: ui_state.is_offroad())
+
     review_training_guide_btn = BigButton("review\ntraining guide", "", gui_app.texture("icons_mici/settings/device/info.png", 64, 64))
     review_training_guide_btn.set_click_callback(lambda: gui_app.push_widget(ReviewTrainingGuide(completed_callback=lambda: gui_app.pop_widgets_to(self))))
     review_training_guide_btn.set_enabled(lambda: ui_state.is_offroad())
@@ -343,6 +363,7 @@ class DeviceLayoutMici(NavScroller):
       PairBigButton(),
       review_training_guide_btn,
       driver_cam_btn,
+      depth_cam_btn,
       terms_btn,
       regulatory_btn,
       reset_calibration_btn,

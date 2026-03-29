@@ -166,7 +166,7 @@ class MiciHomeLayout(Widget):
     except (ValueError, IndexError, TypeError, AttributeError):
       date_str = ""
 
-    return version, branch, commit[:7], date_str
+    return version + " [depth-v1]", branch, commit[:7], date_str
 
   def _render(self, _):
     # TODO: why is there extra space here to get it to be flush?
