@@ -529,12 +529,7 @@ class _DepthMixin:
       rl.draw_text_ex(font, info, rl.Vector2(rect.x + margin, rect.y + margin + 56), 32, 1,
                       rl.Color(200, 200, 200, 220))
 
-    hint = "Tap to measure  |  X to close"
-    hint_size = rl.measure_text_ex(font, hint, 28, 1)
-    rl.draw_text_ex(font, hint, rl.Vector2(
-      rect.x + margin,
-      rect.y + rect.height - hint_size.y - margin,
-    ), 28, 1, rl.Color(200, 200, 200, 180))
+
 
     # Occupancy grid info (TICI only)
     if self._occ_grid is not None and self._occ_web is not None:
@@ -556,7 +551,6 @@ class _DepthMixin:
     rl.draw_text_ex(font_sm, "close", rl.Vector2(lx - 24, ly - 22), 20, 1, rl.WHITE)
     rl.draw_text_ex(font_sm, "far", rl.Vector2(lx - 24, ly + bar_h + 4), 20, 1, rl.WHITE)
 
-    self._draw_close_button(rect)
     self._draw_probe()
 
   def _render_status(self, rect, has_camera: bool) -> bool:
@@ -697,10 +691,7 @@ else:
         cloudlog.exception("depth: webcam error")
 
     def _handle_mouse_release(self, pos):
-      if self._is_close_btn_hit(pos.x, pos.y):
-        gui_app.pop_widget()
-      else:
-        self._probe_at_screen(pos.x, pos.y)
+      self._probe_at_screen(pos.x, pos.y)
 
     def __del__(self):
       self.close()
