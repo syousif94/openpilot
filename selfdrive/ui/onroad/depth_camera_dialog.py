@@ -13,6 +13,7 @@ On Mac: Uses the webcam via OpenCV + CPU onnxruntime.
 Before use, export the model:
   python selfdrive/depthd/export_depth_model.py   (Mac, needs torch)
 """
+import io
 import os
 import time
 import threading
@@ -32,6 +33,11 @@ from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.label import gui_label
 from openpilot.common.swaglog import cloudlog
+
+try:
+  from PIL import Image as _PILImage
+except ImportError:
+  _PILImage = None
 
 if TICI:
   import cereal.messaging as messaging
@@ -205,13 +211,17 @@ class _DepthMixin:
     self._depth_columns_lock = threading.Lock()
     self._depth_columns: dict | None = None
 
+    # JPEG-encoded composited depth frame for web streaming
+    self._depth_frame_lock = threading.Lock()
+    self._depth_frame_jpeg: bytes | None = None
+
     # Direct I2C IMU thread (offroad fallback when sensord isn't running)
     self._imu_stop_event: threading.Event | None = None
     self._imu_thread: threading.Thread | None = None
 
     if TICI:
       self._occ_grid = OccupancyGrid()
-      self._occ_web = OccupancyWebServer(self._occ_grid, get_imu=self._get_imu_data, get_depth=self._get_depth_columns)
+      self._occ_web = OccupancyWebServer(self._occ_grid, get_imu=self._get_imu_data, get_depth=self._get_depth_columns, get_depth_frame=self._get_depth_frame)
       self._occ_web.start()
       try:
         self._sm = messaging.SubMaster(['livePose', 'liveCalibration', 'accelerometer', 'gyroscope'])
@@ -390,6 +400,11 @@ class _DepthMixin:
     with self._depth_columns_lock:
       return self._depth_columns
 
+  def _get_depth_frame(self) -> bytes | None:
+    """Return latest JPEG-encoded depth-colored frame for web streaming."""
+    with self._depth_frame_lock:
+      return self._depth_frame_jpeg
+
   def _update_pose(self) -> tuple[float, float, float]:
     """Poll livePose/IMU and return (delta_x, delta_y, delta_yaw) since last call.
 
@@ -486,7 +501,25 @@ class _DepthMixin:
       # Normalise so 0 = close, 1 = far (invert for colormap: 0=purple=close, 255=red=far)
       depth_norm = 1.0 - np.clip((inv_depth - self._depth_min) / rng, 0.0, 1.0)
       depth_u8 = (depth_norm * 255).astype(np.uint8)
-      rgba = np.ascontiguousarray(COLORMAP_LUT[depth_u8][:, ::-1])
+      depth_colors = COLORMAP_LUT[depth_u8]  # (H, W, 4) RGBA
+
+      # Composite depth overlay on camera RGB for web streaming
+      if self._occ_web is not None and _PILImage is not None:
+        try:
+          alpha_f = depth_colors[:, :, 3:4].astype(np.float32) / 255.0
+          composited = np.clip(
+              rgb.astype(np.float32) * (1.0 - alpha_f) +
+              depth_colors[:, :, :3].astype(np.float32) * alpha_f,
+              0, 255
+          ).astype(np.uint8)
+          buf = io.BytesIO()
+          _PILImage.fromarray(composited).save(buf, format='JPEG', quality=75)
+          with self._depth_frame_lock:
+            self._depth_frame_jpeg = buf.getvalue()
+        except Exception:
+          pass
+
+      rgba = np.ascontiguousarray(depth_colors[:, ::-1])
 
       # Compute per-column closest/farthest for web UI (reversed so left=left on screen)
       col_closest = inv_depth.max(axis=0)[::-1].tolist()   # max inv_depth = closest

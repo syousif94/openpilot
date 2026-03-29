@@ -90,23 +90,40 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   #imu-panel .label { color: #888; }
   #imu-panel .axis { color: #888; margin-right: 2px; }
   #imu-panel .val { color: #0ff; font-weight: bold; margin-right: 8px; }
-  canvas { display: block; width: 100vw; height: 100vh; }
-  #status { position: absolute; bottom: 12px; right: 16px; font-size: 11px; color: #666; z-index: 10; }
+  #container { display: flex; flex-direction: column; width: 100vw; height: 100vh; }
+  #cam-section {
+    flex: 0 0 55%; position: relative; background: #111;
+    display: flex; justify-content: center; align-items: center;
+    overflow: hidden;
+  }
+  #depth-cam { max-width: 100%; max-height: 100%; object-fit: contain; display: none; }
+  #cam-placeholder { color: #555; font-size: 16px; position: absolute; }
+  #chart-section { flex: 1; position: relative; min-height: 0; overflow: hidden; }
+  #chart-section canvas { display: block; }
+  #status { position: absolute; bottom: 4px; right: 8px; font-size: 11px; color: #666; z-index: 10; }
 </style>
 </head>
 <body>
-<div id="hud">
-  <div>Depth Profile <b>LIVE</b></div>
-  <div id="info">connecting…</div>
+<div id="container">
+  <div id="cam-section">
+    <img id="depth-cam" alt="Depth Camera">
+    <div id="cam-placeholder">Waiting for depth frames…</div>
+    <div id="hud">
+      <div>Depth Profile <b>LIVE</b></div>
+      <div id="info">connecting…</div>
+    </div>
+    <div id="imu-panel">
+      <div class="label">gyro (rad/s)</div>
+      <div><span class="axis">X</span><span class="val" id="gx">—</span> <span class="axis">Y</span><span class="val" id="gy">—</span> <span class="axis">Z</span><span class="val" id="gz">—</span></div>
+      <div class="label" style="margin-top:4px">accel (m/s²)</div>
+      <div><span class="axis">X</span><span class="val" id="ax">—</span> <span class="axis">Y</span><span class="val" id="ay">—</span> <span class="axis">Z</span><span class="val" id="az">—</span></div>
+    </div>
+  </div>
+  <div id="chart-section">
+    <canvas id="c"></canvas>
+    <div id="status"></div>
+  </div>
 </div>
-<div id="imu-panel">
-  <div class="label">gyro (rad/s)</div>
-  <div><span class="axis">X</span><span class="val" id="gx">—</span> <span class="axis">Y</span><span class="val" id="gy">—</span> <span class="axis">Z</span><span class="val" id="gz">—</span></div>
-  <div class="label" style="margin-top:4px">accel (m/s²)</div>
-  <div><span class="axis">X</span><span class="val" id="ax">—</span> <span class="axis">Y</span><span class="val" id="ay">—</span> <span class="axis">Z</span><span class="val" id="az">—</span></div>
-</div>
-<div id="status"></div>
-<canvas id="c"></canvas>
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -284,8 +301,9 @@ function updateDeadReckoning(gyro, accel) {
 }
 
 function resize() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  const section = document.getElementById('chart-section');
+  canvas.width = section.clientWidth;
+  canvas.height = section.clientHeight;
 }
 window.addEventListener('resize', resize);
 resize();
@@ -579,6 +597,25 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
+// Depth camera frame streaming
+const depthImg = document.getElementById('depth-cam');
+const camPlaceholder = document.getElementById('cam-placeholder');
+let prevFrameUrl = null;
+async function fetchFrame() {
+  try {
+    const resp = await fetch('/frame.jpg');
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    if (prevFrameUrl) URL.revokeObjectURL(prevFrameUrl);
+    prevFrameUrl = URL.createObjectURL(blob);
+    depthImg.src = prevFrameUrl;
+    depthImg.style.display = 'block';
+    camPlaceholder.style.display = 'none';
+  } catch(e) {}
+}
+setInterval(fetchFrame, 250);
+fetchFrame();
+
 setInterval(fetchData, 150);
 fetchData();
 loop();
@@ -593,6 +630,7 @@ class _GridHandler(BaseHTTPRequestHandler):
   grid: OccupancyGrid | None = None  # set externally before starting server
   get_imu = None  # callback: () -> dict with gyro/accel, set externally
   get_depth = None  # callback: () -> dict with closest/farthest columns, set externally
+  get_depth_frame = None  # callback: () -> bytes|None (JPEG frame), set externally
 
   def log_message(self, fmt, *args):
     pass  # suppress access logs
@@ -604,6 +642,8 @@ class _GridHandler(BaseHTTPRequestHandler):
       self._serve_json()
     elif self.path == '/grid.png':
       self._serve_png()
+    elif self.path == '/frame.jpg':
+      self._serve_frame()
     else:
       self.send_error(404)
 
@@ -663,15 +703,33 @@ class _GridHandler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(data)
 
+  def _serve_frame(self):
+    get_fn = self.__class__.get_depth_frame
+    if not get_fn:
+      self.send_error(503, 'Depth frame callback not set')
+      return
+    jpeg = get_fn()
+    if jpeg is None:
+      self.send_error(503, 'No frame available yet')
+      return
+    self.send_response(200)
+    self.send_header('Content-Type', 'image/jpeg')
+    self.send_header('Content-Length', str(len(jpeg)))
+    self.send_header('Cache-Control', 'no-cache')
+    self.send_header('Access-Control-Allow-Origin', '*')
+    self.end_headers()
+    self.wfile.write(jpeg)
+
 
 class OccupancyWebServer:
   """Manages the HTTP server lifecycle in a background thread."""
 
-  def __init__(self, grid: OccupancyGrid, port: int = WEB_PORT, get_imu=None, get_depth=None):
+  def __init__(self, grid: OccupancyGrid, port: int = WEB_PORT, get_imu=None, get_depth=None, get_depth_frame=None):
     self._grid = grid
     self._port = port
     self._get_imu = get_imu
     self._get_depth = get_depth
+    self._get_depth_frame = get_depth_frame
     self._server: HTTPServer | None = None
     self._thread: threading.Thread | None = None
 
@@ -679,6 +737,7 @@ class OccupancyWebServer:
     _GridHandler.grid = self._grid
     _GridHandler.get_imu = self._get_imu
     _GridHandler.get_depth = self._get_depth
+    _GridHandler.get_depth_frame = self._get_depth_frame
     self._server = HTTPServer(('0.0.0.0', self._port), _GridHandler)
     self._server.timeout = 1.0
     self._thread = threading.Thread(target=self._run, daemon=True, name='occ-web')
