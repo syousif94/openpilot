@@ -512,8 +512,6 @@ class _DepthMixin:
               depth_colors[:, :, :3].astype(np.float32) * alpha_f,
               0, 255
           ).astype(np.uint8)
-          # Flip horizontally to match on-device mirror view
-          composited = composited[:, ::-1]
           buf = io.BytesIO()
           _PILImage.fromarray(composited).save(buf, format='JPEG', quality=75)
           with self._depth_frame_lock:
