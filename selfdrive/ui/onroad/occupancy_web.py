@@ -92,7 +92,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   #imu-panel .val { color: #0ff; font-weight: bold; margin-right: 8px; }
   canvas { display: block; width: 100vw; height: 100vh; }
   #depth-cam-wrapper {
-    position: absolute; top: 110px; right: 16px; z-index: 10;
+    position: absolute; top: 160px; right: 16px; z-index: 10;
     background: rgba(0,0,0,0.65); border-radius: 8px; padding: 6px;
     backdrop-filter: blur(4px); pointer-events: none;
   }
@@ -108,7 +108,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 </div>
 <div id="imu-panel">
   <div class="label">orientation (°)</div>
-  <div><span class="axis">Y</span><span class="val" id="yaw">—</span> <span class="axis">P</span><span class="val" id="pitch">—</span> <span class="axis">R</span><span class="val" id="roll">—</span></div>
+  <div><span class="axis">yaw</span><span class="val" id="yaw">—</span> <span class="axis">pitch</span><span class="val" id="pitch">—</span> <span class="axis">roll</span><span class="val" id="roll">—</span></div>
   <div class="label" style="margin-top:4px">gyro (rad/s)</div>
   <div><span class="axis">X</span><span class="val" id="gx">—</span> <span class="axis">Y</span><span class="val" id="gy">—</span> <span class="axis">Z</span><span class="val" id="gz">—</span></div>
   <div class="label" style="margin-top:4px">accel (m/s²)</div>
