@@ -90,40 +90,34 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   #imu-panel .label { color: #888; }
   #imu-panel .axis { color: #888; margin-right: 2px; }
   #imu-panel .val { color: #0ff; font-weight: bold; margin-right: 8px; }
-  #container { display: flex; flex-direction: column; width: 100vw; height: 100vh; }
-  #cam-section {
-    flex: 0 0 55%; position: relative; background: #111;
-    display: flex; justify-content: center; align-items: center;
-    overflow: hidden;
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #depth-cam-wrapper {
+    position: absolute; top: 110px; right: 16px; z-index: 10;
+    background: rgba(0,0,0,0.65); border-radius: 8px; padding: 6px;
+    backdrop-filter: blur(4px); pointer-events: none;
   }
-  #depth-cam { max-width: 100%; max-height: 100%; object-fit: contain; display: none; }
-  #cam-placeholder { color: #555; font-size: 16px; position: absolute; }
-  #chart-section { flex: 1; position: relative; min-height: 0; overflow: hidden; }
-  #chart-section canvas { display: block; }
-  #status { position: absolute; bottom: 4px; right: 8px; font-size: 11px; color: #666; z-index: 10; }
+  #depth-cam { display: none; border-radius: 4px; width: 240px; }
+  #cam-placeholder { color: #555; font-size: 11px; padding: 4px; }
+  #status { position: absolute; bottom: 12px; right: 16px; font-size: 11px; color: #666; z-index: 10; }
 </style>
 </head>
 <body>
-<div id="container">
-  <div id="cam-section">
-    <img id="depth-cam" alt="Depth Camera">
-    <div id="cam-placeholder">Waiting for depth frames…</div>
-    <div id="hud">
-      <div>Depth Profile <b>LIVE</b></div>
-      <div id="info">connecting…</div>
-    </div>
-    <div id="imu-panel">
-      <div class="label">gyro (rad/s)</div>
-      <div><span class="axis">X</span><span class="val" id="gx">—</span> <span class="axis">Y</span><span class="val" id="gy">—</span> <span class="axis">Z</span><span class="val" id="gz">—</span></div>
-      <div class="label" style="margin-top:4px">accel (m/s²)</div>
-      <div><span class="axis">X</span><span class="val" id="ax">—</span> <span class="axis">Y</span><span class="val" id="ay">—</span> <span class="axis">Z</span><span class="val" id="az">—</span></div>
-    </div>
-  </div>
-  <div id="chart-section">
-    <canvas id="c"></canvas>
-    <div id="status"></div>
-  </div>
+<div id="hud">
+  <div>Depth Profile <b>LIVE</b></div>
+  <div id="info">connecting…</div>
 </div>
+<div id="imu-panel">
+  <div class="label">gyro (rad/s)</div>
+  <div><span class="axis">X</span><span class="val" id="gx">—</span> <span class="axis">Y</span><span class="val" id="gy">—</span> <span class="axis">Z</span><span class="val" id="gz">—</span></div>
+  <div class="label" style="margin-top:4px">accel (m/s²)</div>
+  <div><span class="axis">X</span><span class="val" id="ax">—</span> <span class="axis">Y</span><span class="val" id="ay">—</span> <span class="axis">Z</span><span class="val" id="az">—</span></div>
+</div>
+<div id="depth-cam-wrapper">
+  <img id="depth-cam" alt="Depth Camera">
+  <div id="cam-placeholder">Waiting for depth frames…</div>
+</div>
+<div id="status"></div>
+<canvas id="c"></canvas>
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -301,9 +295,8 @@ function updateDeadReckoning(gyro, accel) {
 }
 
 function resize() {
-  const section = document.getElementById('chart-section');
-  canvas.width = section.clientWidth;
-  canvas.height = section.clientHeight;
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
 }
 window.addEventListener('resize', resize);
 resize();
