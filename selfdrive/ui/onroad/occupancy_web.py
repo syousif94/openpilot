@@ -113,6 +113,45 @@ const status = document.getElementById('status');
 let depthData = null;
 let imu = { gyro: [0,0,0], accel: [0,0,0] };
 
+// Dead-reckoning state for minimap
+let drHeading = 0;          // radians (0 = forward)
+let drX = 0, drY = 0;      // world-frame position (m)
+let drVx = 0, drVy = 0;    // world-frame velocity (m/s)
+let drPath = [{x:0, y:0}]; // accumulated trail
+let lastDRTime = null;
+
+function updateDeadReckoning(gyro, accel) {
+  const now = performance.now() / 1000;
+  if (lastDRTime === null) { lastDRTime = now; return; }
+  const dt = Math.min(now - lastDRTime, 0.5);
+  lastDRTime = now;
+  if (dt < 0.001) return;
+
+  // Heading from gyro Z (yaw rate)
+  drHeading += gyro[2] * dt;
+
+  // Horizontal accel in device frame (ignore Z — mostly gravity)
+  const ax = accel[0];
+  const ay = accel[1];
+
+  // Rotate to world frame by current heading
+  const ch = Math.cos(drHeading), sh = Math.sin(drHeading);
+  const wax = ax * ch - ay * sh;
+  const way = ax * sh + ay * ch;
+
+  // Integrate velocity with exponential decay to limit drift
+  const decay = Math.exp(-0.3 * dt);
+  drVx = drVx * decay + wax * dt;
+  drVy = drVy * decay + way * dt;
+
+  // Integrate position
+  drX += drVx * dt;
+  drY += drVy * dt;
+
+  drPath.push({x: drX, y: drY});
+  if (drPath.length > 4000) drPath = drPath.slice(-4000);
+}
+
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
@@ -246,6 +285,111 @@ function draw() {
   ctx.rotate(-Math.PI / 2);
   ctx.fillText('inverse depth (MiDaS)', 0, 0);
   ctx.restore();
+
+  // ── Minimap ──
+  drawMinimap();
+}
+
+function drawMinimap() {
+  if (drPath.length < 2) return;
+
+  const mW = 200, mH = 200;
+  const mx = 16, my = canvas.height - mH - 30;
+
+  // Background
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(mx, my, mW, mH);
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mx, my, mW, mH);
+
+  // Compute path bounds
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  for (const p of drPath) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+
+  const pad = 20;
+  const rangeX = maxX - minX;
+  const rangeY = maxY - minY;
+  const maxRange = Math.max(rangeX, rangeY, 0.5); // at least 0.5 m
+  const scale = (Math.min(mW, mH) - 2 * pad) / maxRange;
+  const cenX = (minX + maxX) / 2;
+  const cenY = (minY + maxY) / 2;
+
+  // Draw path (green line)
+  ctx.beginPath();
+  ctx.strokeStyle = '#0f0';
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < drPath.length; i++) {
+    const sx = mx + mW / 2 + (drPath[i].x - cenX) * scale;
+    const sy = my + mH / 2 - (drPath[i].y - cenY) * scale;
+    if (i === 0) ctx.moveTo(sx, sy);
+    else ctx.lineTo(sx, sy);
+  }
+  ctx.stroke();
+
+  // Start marker (dim circle)
+  const first = drPath[0];
+  const fx = mx + mW / 2 + (first.x - cenX) * scale;
+  const fy = my + mH / 2 - (first.y - cenY) * scale;
+  ctx.beginPath();
+  ctx.arc(fx, fy, 3, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,255,0,0.3)';
+  ctx.fill();
+
+  // Current position dot
+  const last = drPath[drPath.length - 1];
+  const lx = mx + mW / 2 + (last.x - cenX) * scale;
+  const ly = my + mH / 2 - (last.y - cenY) * scale;
+  ctx.beginPath();
+  ctx.arc(lx, ly, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#0f0';
+  ctx.fill();
+
+  // Heading indicator (small line from dot)
+  const hLen = 10;
+  ctx.beginPath();
+  ctx.moveTo(lx, ly);
+  ctx.lineTo(lx + Math.sin(drHeading) * hLen, ly - Math.cos(drHeading) * hLen);
+  ctx.strokeStyle = '#0f0';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // ── Scale bar ──
+  const barMaxPx = mW * 0.4;
+  const barMaxM = barMaxPx / scale;
+  const niceSteps = [0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+  let scaleM = niceSteps[0];
+  for (const s of niceSteps) {
+    if (s <= barMaxM) scaleM = s;
+    else break;
+  }
+  const scalePx = scaleM * scale;
+  const sbx = mx + 8, sby = my + mH - 12;
+
+  ctx.strokeStyle = '#ccc';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(sbx, sby); ctx.lineTo(sbx + scalePx, sby); ctx.stroke();
+  // Endcaps
+  ctx.beginPath(); ctx.moveTo(sbx, sby - 4); ctx.lineTo(sbx, sby + 4); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(sbx + scalePx, sby - 4); ctx.lineTo(sbx + scalePx, sby + 4); ctx.stroke();
+
+  ctx.fillStyle = '#ccc';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  let label = scaleM >= 1 ? scaleM + ' m' : Math.round(scaleM * 100) + ' cm';
+  ctx.fillText(label, sbx + scalePx + 5, sby + 3);
+
+  // Title
+  ctx.fillStyle = '#888';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('IMU path', mx + 6, my + 14);
 }
 
 async function fetchData() {
@@ -255,6 +399,8 @@ async function fetchData() {
     const obj = await resp.json();
     if (obj.imu) imu = obj.imu;
     if (obj.depth) depthData = obj.depth;
+
+    updateDeadReckoning(imu.gyro, imu.accel);
 
     const g = imu.gyro;
     const a = imu.accel;
