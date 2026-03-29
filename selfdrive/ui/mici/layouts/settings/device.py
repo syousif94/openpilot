@@ -4,10 +4,6 @@ import pyray as rl
 from enum import IntEnum
 from collections.abc import Callable
 
-# Debug: write marker when this module is imported
-with open('/tmp/device_py_loaded', 'w') as _f:
-  _f.write('depth-v2')
-
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.time_helpers import system_time_valid

@@ -6,7 +6,6 @@ from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.onroad.driver_camera_dialog import DriverCameraDialog
-from openpilot.selfdrive.ui.onroad.depth_camera_dialog import DepthCameraDialog
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.layouts.onboarding import TrainingGuide
 from openpilot.selfdrive.ui.widgets.pairing_dialog import PairingDialog
@@ -62,7 +61,7 @@ class DeviceLayout(Widget):
       button_item(lambda: tr("Driver Camera"), lambda: tr("PREVIEW"), lambda: tr(DESCRIPTIONS['driver_camera']),
                   callback=lambda: gui_app.push_widget(DriverCameraDialog()), enabled=ui_state.is_offroad),
       button_item(lambda: tr("Depth Camera"), lambda: tr("PREVIEW"), lambda: tr(DESCRIPTIONS['depth_camera']),
-                  callback=lambda: gui_app.push_widget(DepthCameraDialog()), enabled=ui_state.is_offroad),
+                  callback=lambda: self._open_depth_camera(), enabled=ui_state.is_offroad),
       self._reset_calib_btn,
       button_item(lambda: tr("Review Training Guide"), lambda: tr("REVIEW"), lambda: tr(DESCRIPTIONS['review_guide']),
                   self._on_review_training_guide, enabled=ui_state.is_offroad),
@@ -93,6 +92,13 @@ class DeviceLayout(Widget):
     self._select_language_dialog = MultiOptionDialog(tr("Select a language"), multilang.languages, multilang.codes[multilang.language],
                                                      option_font_weight=FontWeight.UNIFONT, callback=handle_language_selection)
     gui_app.push_widget(self._select_language_dialog)
+
+  def _open_depth_camera(self):
+    try:
+      from openpilot.selfdrive.ui.onroad.depth_camera_dialog import DepthCameraDialog
+      gui_app.push_widget(DepthCameraDialog())
+    except Exception:
+      cloudlog.exception('depth: failed to open dialog')
 
   def _reset_calibration_prompt(self):
     if ui_state.engaged:

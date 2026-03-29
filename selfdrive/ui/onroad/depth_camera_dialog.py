@@ -27,7 +27,6 @@ if TICI:
   from openpilot.system.ui.widgets.nav_widget import NavWidget
   from openpilot.selfdrive.ui.ui_state import device, ui_state
 
-import onnxruntime as ort
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.widgets import Widget
@@ -247,6 +246,7 @@ class _DepthMixin:
           self._model_loading = False
           return
       cloudlog.info(f"depth: loading ONNX from {onnx_path}")
+      import onnxruntime as ort
       opts = ort.SessionOptions()
       if TICI:
         opts.intra_op_num_threads = 4
