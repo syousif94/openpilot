@@ -45,6 +45,7 @@ DEPTH_H = 256
 
 # Model file paths
 MODEL_NAME = "midas_small"
+MODEL_URL = "https://github.com/syousif94/openpilot/releases/download/onnx/midas_small.sim.onnx"
 _DEPTH_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "depth_model")
 if TICI:
   DEPTH_ONNX_PATH = f"/data/depth_model/{MODEL_NAME}.sim.onnx"
@@ -214,17 +215,37 @@ class _DepthMixin:
     self._load_thread = threading.Thread(target=self._load_model_bg, daemon=True)
     self._load_thread.start()
 
+  @staticmethod
+  def _download_model(dest: str) -> bool:
+    """Download the ONNX model from GitHub release if not present."""
+    import requests
+    cloudlog.info(f"depth: downloading model to {dest}")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".tmp"
+    try:
+      resp = requests.get(MODEL_URL, stream=True, timeout=60, allow_redirects=True)
+      resp.raise_for_status()
+      with open(tmp, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+          f.write(chunk)
+      os.rename(tmp, dest)
+      cloudlog.info(f"depth: model downloaded ({os.path.getsize(dest) / 1e6:.1f} MB)")
+      return True
+    except Exception as e:
+      cloudlog.error(f"depth: model download failed: {e}")
+      if os.path.exists(tmp):
+        os.remove(tmp)
+      return False
+
   def _load_model_bg(self):
     try:
       onnx_path = os.path.realpath(DEPTH_ONNX_PATH)
       if not os.path.exists(onnx_path):
-        self._model_error = (
-          f"ONNX not found: {onnx_path}\n"
-          "Run: python selfdrive/depthd/export_depth_model.py"
-        )
-        cloudlog.error(f"depth: {self._model_error}")
-        self._model_loading = False
-        return
+        cloudlog.warning(f"depth: ONNX not found at {onnx_path}, downloading...")
+        if not self._download_model(onnx_path):
+          self._model_error = f"Failed to download model from {MODEL_URL}"
+          self._model_loading = False
+          return
       cloudlog.info(f"depth: loading ONNX from {onnx_path}")
       opts = ort.SessionOptions()
       if TICI:
