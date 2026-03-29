@@ -300,7 +300,8 @@ class _DepthMixin:
       return dx, dy, dyaw
 
     try:
-      sm.update(0)  # non-blocking poll
+      # NOTE: sm.update() is called from _update_state() on the main thread.
+      # Do NOT call sm.update() here — just read the already-cached values.
 
       now = time.monotonic()
       dt = 0.0
@@ -310,17 +311,6 @@ class _DepthMixin:
 
       if dt < 1e-6:
         return dx, dy, dyaw
-
-      # Always read raw gyro/accel for the web UI, regardless of livePose
-      if sm.recv_frame.get('gyroscope', 0) > 0:
-        gyro = sm['gyroscope']
-        if hasattr(gyro, 'gyro') and len(gyro.gyro.v) > 2:
-          self._last_gyro = [float(gyro.gyro.v[i]) for i in range(3)]
-
-      if sm.recv_frame.get('accelerometer', 0) > 0:
-        accel = sm['accelerometer']
-        if hasattr(accel, 'acceleration') and len(accel.acceleration.v) >= 3:
-          self._last_accel = [float(accel.acceleration.v[i]) for i in range(3)]
 
       # Prefer livePose (fused IMU + visual odometry at 20 Hz)
       if sm.recv_frame.get('livePose', 0) > 0 and sm.valid.get('livePose', False):
@@ -393,9 +383,9 @@ class _DepthMixin:
       depth_u8 = (depth_norm * 255).astype(np.uint8)
       rgba = np.ascontiguousarray(COLORMAP_LUT[depth_u8][:, ::-1])
 
-      # Compute per-column closest/farthest for web UI
-      col_closest = inv_depth.max(axis=0).tolist()   # max inv_depth = closest
-      col_farthest = inv_depth.min(axis=0).tolist()  # min inv_depth = farthest
+      # Compute per-column closest/farthest for web UI (reversed so left=left on screen)
+      col_closest = inv_depth.max(axis=0)[::-1].tolist()   # max inv_depth = closest
+      col_farthest = inv_depth.min(axis=0)[::-1].tolist()  # min inv_depth = farthest
       with self._depth_columns_lock:
         self._depth_columns = {
           'closest': [round(v, 2) for v in col_closest],

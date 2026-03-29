@@ -161,7 +161,7 @@ function draw() {
     ctx.moveTo(pad.left, y);
     ctx.lineTo(pad.left + cw, y);
     ctx.stroke();
-    const val = gMin + (i / nGridY) * range;
+    const val = gMax - (i / nGridY) * range;
     ctx.fillStyle = '#555';
     ctx.font = '11px monospace';
     ctx.textAlign = 'right';
@@ -187,13 +187,13 @@ function draw() {
   ctx.beginPath();
   for (let i = 0; i < cols; i++) {
     const x = pad.left + (i / (cols - 1)) * cw;
-    const y = pad.top + ((closest[i] - gMin) / range) * ch;
+    const y = pad.top + (1 - (closest[i] - gMin) / range) * ch;
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
   for (let i = cols - 1; i >= 0; i--) {
     const x = pad.left + (i / (cols - 1)) * cw;
-    const y = pad.top + ((farthest[i] - gMin) / range) * ch;
+    const y = pad.top + (1 - (farthest[i] - gMin) / range) * ch;
     ctx.lineTo(x, y);
   }
   ctx.closePath();
@@ -206,7 +206,7 @@ function draw() {
   ctx.lineWidth = 2;
   for (let i = 0; i < cols; i++) {
     const x = pad.left + (i / (cols - 1)) * cw;
-    const y = pad.top + ((farthest[i] - gMin) / range) * ch;
+    const y = pad.top + (1 - (farthest[i] - gMin) / range) * ch;
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
@@ -218,7 +218,7 @@ function draw() {
   ctx.lineWidth = 2;
   for (let i = 0; i < cols; i++) {
     const x = pad.left + (i / (cols - 1)) * cw;
-    const y = pad.top + ((closest[i] - gMin) / range) * ch;
+    const y = pad.top + (1 - (closest[i] - gMin) / range) * ch;
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
