@@ -117,95 +117,166 @@ let depthData = null;
 let imu = { gyro: [0,0,0], accel: [0,0,0] };
 
 // Dead-reckoning state for minimap
-let drHeading = 0;          // radians (0 = forward)
 let drX = 0, drY = 0;      // world-frame position (m)
 let drVx = 0, drVy = 0;    // world-frame velocity (m/s)
 let drPath = [{x:0, y:0}]; // accumulated trail
 let lastDRTime = null;
 
-// Gravity calibration: collect samples before integrating
-const GRAV_CAL_SAMPLES = 30;  // ~4.5 s at 150 ms poll
-let gravCalBuf = [];           // [{x,y,z}, ...]
+// ── Madgwick AHRS filter ──
+// Quaternion [w, x, y, z] — starts as identity (no rotation)
+let q0 = 1, q1 = 0, q2 = 0, q3 = 0;
+const madgwickBeta = 0.1;  // filter gain — higher = more accel trust, less gyro drift
+let madgwickInitialised = false;
+
+// Gyro bias: calibrated from first N samples while stationary
+const BIAS_SAMPLES = 20;
+let biasBuf = [];
+let gbiasX = 0, gbiasY = 0, gbiasZ = 0;
+// Gravity calibration for position integration
+let gravCalBuf = [];
 let gravX = 0, gravY = 0, gravZ = 0;
-let gravCalibrated = false;
+let calibrated = false;
 
-// Gyro bias calibration (same window)
-let gyroBiasBuf = [];
-let gyroBiasX = 0, gyroBiasY = 0, gyroBiasZ = 0;
+function madgwickUpdate(gx, gy, gz, ax, ay, az, dt) {
+  // Normalise accelerometer
+  let norm = Math.sqrt(ax*ax + ay*ay + az*az);
+  if (norm < 0.01) return;  // can't determine gravity direction
+  norm = 1.0 / norm;
+  ax *= norm; ay *= norm; az *= norm;
 
-// Gyro high-pass state (removes slow bias drift)
-let hpGz = 0, prevRawGz = 0;
+  // Auxiliary variables
+  const _2q0 = 2*q0, _2q1 = 2*q1, _2q2 = 2*q2, _2q3 = 2*q3;
+  const _4q0 = 4*q0, _4q1 = 4*q1, _4q2 = 4*q2;
+  const _8q1 = 8*q1, _8q2 = 8*q2;
+  const q0q0 = q0*q0, q1q1 = q1*q1, q2q2 = q2*q2, q3q3 = q3*q3;
+
+  // Gradient descent corrective step (objective: align estimated gravity with measured)
+  let s0 = _4q0*q2q2 + _2q2*ax + _4q0*q1q1 - _2q1*ay;
+  let s1 = _4q1*q3q3 - _2q3*ax + 4*q0q0*q1 - _2q0*ay - _4q1 + _8q1*q1q1 + _8q1*q2q2 + _4q1*az;
+  let s2 = 4*q0q0*q2 + _2q0*ax + _4q2*q3q3 - _2q3*ay - _4q2 + _8q2*q1q1 + _8q2*q2q2 + _4q2*az;
+  let s3 = 4*q1q1*q3 - _2q1*ax + 4*q2q2*q3 - _2q2*ay;
+  // Normalise step
+  norm = 1.0 / Math.sqrt(s0*s0 + s1*s1 + s2*s2 + s3*s3 + 1e-12);
+  s0 *= norm; s1 *= norm; s2 *= norm; s3 *= norm;
+
+  // Apply feedback (gyro rate minus correction)
+  const beta = madgwickBeta;
+  const qDot0 = 0.5*(-q1*gx - q2*gy - q3*gz) - beta*s0;
+  const qDot1 = 0.5*(q0*gx + q2*gz - q3*gy)  - beta*s1;
+  const qDot2 = 0.5*(q0*gy - q1*gz + q3*gx)  - beta*s2;
+  const qDot3 = 0.5*(q0*gz + q1*gy - q2*gx)  - beta*s3;
+
+  // Integrate
+  q0 += qDot0 * dt;
+  q1 += qDot1 * dt;
+  q2 += qDot2 * dt;
+  q3 += qDot3 * dt;
+
+  // Normalise quaternion
+  norm = 1.0 / Math.sqrt(q0*q0 + q1*q1 + q2*q2 + q3*q3);
+  q0 *= norm; q1 *= norm; q2 *= norm; q3 *= norm;
+}
+
+function getYaw() {
+  // Extract yaw (heading around Z) from quaternion
+  return Math.atan2(2*(q0*q3 + q1*q2), 1 - 2*(q2*q2 + q3*q3));
+}
+
+function getRoll() {
+  return Math.atan2(2*(q0*q1 + q2*q3), 1 - 2*(q1*q1 + q2*q2));
+}
+
+function getPitch() {
+  const sinp = 2*(q0*q2 - q3*q1);
+  return Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI/2 : Math.asin(sinp);
+}
+
+// Rotate a vector from sensor frame to world frame using the quaternion
+function rotateToWorld(sx, sy, sz) {
+  // q * v * q^-1  (for unit quaternion, q^-1 = conjugate)
+  // Expanded for efficiency:
+  const _2q0 = 2*q0, _2q1 = 2*q1, _2q2 = 2*q2, _2q3 = 2*q3;
+  const q0q0 = q0*q0, q1q1 = q1*q1, q2q2 = q2*q2, q3q3 = q3*q3;
+
+  const wx = (q0q0 + q1q1 - q2q2 - q3q3)*sx + (_2q1*q2 - _2q0*q3)*sy + (_2q1*q3 + _2q0*q2)*sz;
+  const wy = (_2q1*q2 + _2q0*q3)*sx + (q0q0 - q1q1 + q2q2 - q3q3)*sy + (_2q2*q3 - _2q0*q1)*sz;
+  const wz = (_2q1*q3 - _2q0*q2)*sx + (_2q2*q3 + _2q0*q1)*sy + (q0q0 - q1q1 - q2q2 + q3q3)*sz;
+
+  return [wx, wy, wz];
+}
 
 function updateDeadReckoning(gyro, accel) {
   const now = performance.now() / 1000;
-  if (lastDRTime === null) { lastDRTime = now; prevRawGz = gyro[2]; return; }
+  if (lastDRTime === null) { lastDRTime = now; return; }
   const dt = Math.min(now - lastDRTime, 0.5);
   lastDRTime = now;
   if (dt < 0.001) return;
 
-  // ── Calibration phase: accumulate gravity + gyro bias ──
-  if (!gravCalibrated) {
+  // ── Calibration phase ──
+  if (!calibrated) {
+    biasBuf.push({x: gyro[0], y: gyro[1], z: gyro[2]});
     gravCalBuf.push({x: accel[0], y: accel[1], z: accel[2]});
-    gyroBiasBuf.push({x: gyro[0], y: gyro[1], z: gyro[2]});
-    if (gravCalBuf.length >= GRAV_CAL_SAMPLES) {
-      gravX = gravCalBuf.reduce((s, v) => s + v.x, 0) / gravCalBuf.length;
-      gravY = gravCalBuf.reduce((s, v) => s + v.y, 0) / gravCalBuf.length;
-      gravZ = gravCalBuf.reduce((s, v) => s + v.z, 0) / gravCalBuf.length;
-      gyroBiasX = gyroBiasBuf.reduce((s, v) => s + v.x, 0) / gyroBiasBuf.length;
-      gyroBiasY = gyroBiasBuf.reduce((s, v) => s + v.y, 0) / gyroBiasBuf.length;
-      gyroBiasZ = gyroBiasBuf.reduce((s, v) => s + v.z, 0) / gyroBiasBuf.length;
-      gravCalibrated = true;
-      prevRawGz = gyro[2] - gyroBiasZ;
+    if (biasBuf.length >= BIAS_SAMPLES) {
+      gbiasX = biasBuf.reduce((s,v) => s+v.x, 0) / biasBuf.length;
+      gbiasY = biasBuf.reduce((s,v) => s+v.y, 0) / biasBuf.length;
+      gbiasZ = biasBuf.reduce((s,v) => s+v.z, 0) / biasBuf.length;
+      gravX = gravCalBuf.reduce((s,v) => s+v.x, 0) / gravCalBuf.length;
+      gravY = gravCalBuf.reduce((s,v) => s+v.y, 0) / gravCalBuf.length;
+      gravZ = gravCalBuf.reduce((s,v) => s+v.z, 0) / gravCalBuf.length;
+      // Initialise quaternion from accelerometer (tilt only)
+      const norm = Math.sqrt(gravX*gravX + gravY*gravY + gravZ*gravZ);
+      const anx = gravX/norm, any = gravY/norm, anz = gravZ/norm;
+      const pitch = Math.asin(-anx);
+      const roll = Math.atan2(any, anz);
+      // Build quaternion from Euler (yaw=0)
+      const cr = Math.cos(roll/2), sr = Math.sin(roll/2);
+      const cp = Math.cos(pitch/2), sp = Math.sin(pitch/2);
+      q0 = cr*cp; q1 = sr*cp; q2 = cr*sp; q3 = -sr*sp;
+      calibrated = true;
     }
     return;
   }
 
-  // ── Heading from bias-corrected, high-pass-filtered gyro Z ──
-  const rawGz = gyro[2] - gyroBiasZ;
-  const hpAlpha = 0.98;
-  hpGz = hpAlpha * (hpGz + rawGz - prevRawGz);
-  prevRawGz = rawGz;
-  const gz = Math.abs(hpGz) > 0.008 ? hpGz : 0;
-  drHeading += gz * dt;
+  // Bias-corrected gyro
+  const gx = gyro[0] - gbiasX;
+  const gy = gyro[1] - gbiasY;
+  const gz = gyro[2] - gbiasZ;
 
-  // ── Linear acceleration (raw minus calibrated gravity) ──
-  let lax = accel[0] - gravX;
-  let lay = accel[1] - gravY;
+  // ── Run Madgwick filter ──
+  madgwickUpdate(gx, gy, gz, accel[0], accel[1], accel[2], dt);
 
-  // Slowly track gravity drift (very conservative)
-  gravX += 0.002 * (accel[0] - gravX);
-  gravY += 0.002 * (accel[1] - gravY);
-  gravZ += 0.002 * (accel[2] - gravZ);
+  // ── Position dead reckoning using quaternion-rotated accel ──
+  // Rotate raw accelerometer to world frame using Madgwick quaternion
+  const [wax, way, waz] = rotateToWorld(accel[0], accel[1], accel[2]);
 
-  // Stationary check: if total accel magnitude is close to 1g, device isn't moving
+  // Subtract gravity in world frame (always straight down)
+  let lax = wax;
+  let lay = way;
+  let laz = waz - 9.81;
+
+  // Stationary check: if total accel magnitude ≈ 1g AND linear accel is small
+  const linMag3 = Math.sqrt(lax*lax + lay*lay + laz*laz);
   const totalAccel = Math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2);
-  const isStationary = Math.abs(totalAccel - 9.81) < 0.3;
+  const isStationary = linMag3 < 0.4 && Math.abs(totalAccel - 9.81) < 0.4;
 
-  // Noise gate
-  const linMag = Math.sqrt(lax * lax + lay * lay);
-  if (linMag < 0.5 || isStationary) { lax = 0; lay = 0; }
+  // Noise gate on horizontal linear acceleration
+  const linMagH = Math.sqrt(lax*lax + lay*lay);
+  if (linMagH < 0.3 || isStationary) { lax = 0; lay = 0; }
 
-  // Rotate to world frame by current heading
-  const ch = Math.cos(drHeading), sh = Math.sin(drHeading);
-  const wax = lax * ch - lay * sh;
-  const way = lax * sh + lay * ch;
+  // Integrate velocity with strong decay
+  const decay = Math.exp(-8.0 * dt);
+  drVx = drVx * decay + lax * dt;
+  drVy = drVy * decay + lay * dt;
 
-  // Integrate velocity with very strong decay
-  const decay = Math.exp(-10.0 * dt);
-  drVx = drVx * decay + wax * dt;
-  drVy = drVy * decay + way * dt;
-
-  // ZUPT: zero velocity when speed is negligible
-  const speed = Math.sqrt(drVx * drVx + drVy * drVy);
+  // ZUPT
+  const speed = Math.sqrt(drVx*drVx + drVy*drVy);
   if (speed < 0.02 || isStationary) { drVx = 0; drVy = 0; }
 
-  // Integrate position
   drX += drVx * dt;
   drY += drVy * dt;
 
-  // Only record point if we actually moved
   const lastPt = drPath[drPath.length - 1];
-  const moved = Math.sqrt((drX - lastPt.x) ** 2 + (drY - lastPt.y) ** 2);
+  const moved = Math.sqrt((drX - lastPt.x)**2 + (drY - lastPt.y)**2);
   if (moved > 0.005) {
     drPath.push({x: drX, y: drY});
     if (drPath.length > 4000) drPath = drPath.slice(-4000);
@@ -411,16 +482,17 @@ function drawMinimap() {
   ctx.fillStyle = '#0f0';
   ctx.fill();
 
-  // Bearing triangle (shows device facing direction)
+  // Bearing triangle (shows device facing direction via Madgwick yaw)
+  const heading = getYaw();
   const hLen = 14;
-  const tipX = lx + Math.sin(drHeading) * hLen;
-  const tipY = ly - Math.cos(drHeading) * hLen;
+  const tipX = lx + Math.sin(heading) * hLen;
+  const tipY = ly - Math.cos(heading) * hLen;
   const baseAng = 2.5;  // half-angle of triangle base (radians)
   const baseLen = 6;
-  const b1x = lx + Math.sin(drHeading + baseAng) * baseLen;
-  const b1y = ly - Math.cos(drHeading + baseAng) * baseLen;
-  const b2x = lx + Math.sin(drHeading - baseAng) * baseLen;
-  const b2y = ly - Math.cos(drHeading - baseAng) * baseLen;
+  const b1x = lx + Math.sin(heading + baseAng) * baseLen;
+  const b1y = ly - Math.cos(heading + baseAng) * baseLen;
+  const b2x = lx + Math.sin(heading - baseAng) * baseLen;
+  const b2y = ly - Math.cos(heading - baseAng) * baseLen;
   ctx.beginPath();
   ctx.moveTo(tipX, tipY);
   ctx.lineTo(b1x, b1y);
@@ -433,11 +505,16 @@ function drawMinimap() {
   ctx.stroke();
 
   // Bearing reading (degrees, 0=north/forward, CW positive)
-  const bearDeg = ((drHeading * 180 / Math.PI) % 360 + 360) % 360;
+  const bearDeg = ((heading * 180 / Math.PI) % 360 + 360) % 360;
+  // Also show pitch/roll from Madgwick
+  const pitchDeg = getPitch() * 180 / Math.PI;
+  const rollDeg = getRoll() * 180 / Math.PI;
   ctx.fillStyle = '#0f0';
   ctx.font = '11px monospace';
   ctx.textAlign = 'right';
-  ctx.fillText(bearDeg.toFixed(0) + '\u00b0', mx + mW - 6, my + 14);
+  ctx.fillText('yaw ' + bearDeg.toFixed(0) + '\u00b0', mx + mW - 6, my + 14);
+  ctx.fillStyle = '#0aa';
+  ctx.fillText('P' + pitchDeg.toFixed(0) + '\u00b0 R' + rollDeg.toFixed(0) + '\u00b0', mx + mW - 6, my + 28);
 
   // ── Scale bar ──
   const barMaxPx = mW * 0.4;
