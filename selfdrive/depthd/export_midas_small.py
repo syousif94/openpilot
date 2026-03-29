@@ -15,8 +15,8 @@ MODEL_TYPE = "MiDaS_small"
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "depth_model")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-ONNX_PATH = os.path.join(OUT_DIR, "midas_small_256.onnx")
-SIM_PATH = os.path.join(OUT_DIR, "midas_small_256.sim.onnx")
+ONNX_PATH = os.path.join(OUT_DIR, "midas_small.onnx")
+SIM_PATH = os.path.join(OUT_DIR, "midas_small.sim.onnx")
 
 
 def main():

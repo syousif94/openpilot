@@ -28,12 +28,19 @@ rsync -avz --progress \
   "${COMMA_USER}@${COMMA_IP}:${REMOTE_PATH}/selfdrive/ui/onroad/"
 
 # 2. Device settings panel (modified — added Depth Camera button)
-echo "--- syncing device.py"
+echo "--- syncing device.py (standard layout)"
 rsync -avz --progress \
   --exclude='__pycache__' \
   -e "$SSH" \
   selfdrive/ui/layouts/settings/device.py \
   "${COMMA_USER}@${COMMA_IP}:${REMOTE_PATH}/selfdrive/ui/layouts/settings/"
+
+echo "--- syncing device.py (mici layout)"
+rsync -avz --progress \
+  --exclude='__pycache__' \
+  -e "$SSH" \
+  selfdrive/ui/mici/layouts/settings/device.py \
+  "${COMMA_USER}@${COMMA_IP}:${REMOTE_PATH}/selfdrive/ui/mici/layouts/settings/"
 
 # 3. Depth model compile script + ONNX model
 echo "--- syncing depthd/"
