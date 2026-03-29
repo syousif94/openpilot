@@ -256,12 +256,6 @@ async function fetchData() {
     if (obj.imu) imu = obj.imu;
     if (obj.depth) depthData = obj.depth;
 
-    // Debug: log full IMU payload including debug info
-    if (obj.imu && obj.imu.debug) {
-      console.log('IMU debug:', JSON.stringify(obj.imu.debug));
-    }
-    console.log('IMU gyro:', imu.gyro, 'accel:', imu.accel);
-
     const g = imu.gyro;
     const a = imu.accel;
     document.getElementById('gyro-val').textContent =

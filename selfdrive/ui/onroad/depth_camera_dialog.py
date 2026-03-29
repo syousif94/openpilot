@@ -205,6 +205,10 @@ class _DepthMixin:
     self._depth_columns_lock = threading.Lock()
     self._depth_columns: dict | None = None
 
+    # Direct I2C IMU thread (offroad fallback when sensord isn't running)
+    self._imu_stop_event: threading.Event | None = None
+    self._imu_thread: threading.Thread | None = None
+
     if TICI:
       self._occ_grid = OccupancyGrid()
       self._occ_web = OccupancyWebServer(self._occ_grid, get_imu=self._get_imu_data, get_depth=self._get_depth_columns)
@@ -213,6 +217,8 @@ class _DepthMixin:
         self._sm = messaging.SubMaster(['livePose', 'liveCalibration', 'accelerometer', 'gyroscope'])
       except Exception:
         cloudlog.warning("depth: could not subscribe to livePose/IMU — grid will accumulate without ego-motion compensation")
+      # Start direct I2C IMU polling (works offroad when sensord is not running)
+      self._start_direct_imu()
 
     # Load model in background
     self._load_thread = threading.Thread(target=self._load_model_bg, daemon=True)
@@ -277,23 +283,106 @@ class _DepthMixin:
     finally:
       self._model_loading = False
 
+  def _start_direct_imu(self):
+    """Start a background thread that reads the LSM6DS3 IMU over I2C.
+    This provides IMU data when sensord is not running (offroad)."""
+    self._imu_stop_event = threading.Event()
+    self._imu_thread = threading.Thread(target=self._imu_poll_loop, daemon=True)
+    self._imu_thread.start()
+
+  def _stop_direct_imu(self):
+    """Stop the direct I2C IMU polling thread."""
+    if self._imu_stop_event is not None:
+      self._imu_stop_event.set()
+    if self._imu_thread is not None:
+      self._imu_thread.join(timeout=2.0)
+      self._imu_thread = None
+    self._imu_stop_event = None
+
+  def _imu_poll_loop(self):
+    """Poll the LSM6DS3 IMU directly over I2C bus 1."""
+    import math
+    import ctypes as _ctypes
+    from openpilot.common.i2c import SMBus
+
+    I2C_BUS = 1
+    DEV_ADDR = 0x6A
+
+    # Register addresses
+    CTRL1_XL = 0x10   # Accel control
+    CTRL2_G  = 0x11   # Gyro control
+    CTRL3_C  = 0x12   # Control register 3
+    STAT_REG = 0x1E   # Status register
+    OUTX_L_G = 0x22   # Gyro data start
+    OUTX_L_XL = 0x28  # Accel data start
+    DRDY_CFG = 0x0B   # Data ready config
+
+    # Scale factors (matching sensord)
+    ACCEL_SCALE = 9.81 * 2.0 / (1 << 15)        # ±2g default
+    GYRO_SCALE = (8.75 / 1000.0) * (math.pi / 180.0)  # ±250 dps default
+
+    def parse_16bit(lsb, msb):
+      return _ctypes.c_int16((msb << 8) | lsb).value
+
+    bus = None
+    try:
+      bus = SMBus(I2C_BUS)
+
+      # Soft reset
+      bus.write_byte_data(DEV_ADDR, CTRL3_C, 0x01)
+      time.sleep(0.15)
+
+      # Init: IF_INC (auto-increment address), BDU off
+      bus.write_byte_data(DEV_ADDR, CTRL3_C, 0x04)
+      # Accel ODR 104 Hz, ±2g (default FS)
+      bus.write_byte_data(DEV_ADDR, CTRL1_XL, 0b0100_0000)
+      # Gyro ODR 104 Hz, ±250 dps (default FS)
+      bus.write_byte_data(DEV_ADDR, CTRL2_G, 0b0100_0000)
+      # Pulse data-ready mode (matches sensord init)
+      bus.write_byte_data(DEV_ADDR, DRDY_CFG, 1 << 7)
+
+      cloudlog.info("depth: direct I2C IMU initialised (104 Hz)")
+
+      while not self._imu_stop_event.is_set():
+        try:
+          status = bus.read_byte_data(DEV_ADDR, STAT_REG)
+
+          # Accelerometer data ready (bit 0)
+          if status & 0x01:
+            raw = bytes(bus.read_i2c_block_data(DEV_ADDR, OUTX_L_XL, 6))
+            ax = parse_16bit(raw[0], raw[1]) * ACCEL_SCALE
+            ay = parse_16bit(raw[2], raw[3]) * ACCEL_SCALE
+            az = parse_16bit(raw[4], raw[5]) * ACCEL_SCALE
+            self._last_accel = [ax, ay, az]
+
+          # Gyroscope data ready (bit 1)
+          if status & 0x02:
+            raw = bytes(bus.read_i2c_block_data(DEV_ADDR, OUTX_L_G, 6))
+            gx = parse_16bit(raw[0], raw[1]) * GYRO_SCALE
+            gy = parse_16bit(raw[2], raw[3]) * GYRO_SCALE
+            gz = parse_16bit(raw[4], raw[5]) * GYRO_SCALE
+            # Axis remapping matches sensord: [y, -x, z]
+            self._last_gyro = [gy, -gx, gz]
+
+          time.sleep(0.01)  # ~100 Hz poll
+        except Exception as exc:
+          cloudlog.warning(f"depth: IMU read error: {exc}")
+          time.sleep(0.1)
+
+    except Exception as exc:
+      cloudlog.error(f"depth: direct I2C IMU init failed: {exc}")
+    finally:
+      if bus is not None:
+        try:
+          bus.close()
+        except Exception:
+          pass
+
   def _get_imu_data(self) -> dict:
     """Return latest IMU readings for the web UI."""
-    debug = {}
-    if self._sm is not None:
-      debug['recv_frames'] = {k: self._sm.recv_frame.get(k, 0) for k in ['gyroscope', 'accelerometer', 'livePose', 'liveCalibration']}
-      debug['valid'] = {k: self._sm.valid.get(k, False) for k in ['gyroscope', 'accelerometer', 'livePose', 'liveCalibration']}
-      # Inspect gyro message structure
-      try:
-        gyro_msg = self._sm['gyroscope']
-        debug['gyro_which'] = str(gyro_msg.which()) if hasattr(gyro_msg, 'which') else 'no_which'
-        debug['gyro_dir'] = [a for a in dir(gyro_msg) if not a.startswith('_')][:20]
-      except Exception as e:
-        debug['gyro_err'] = str(e)
     return {
       'gyro': self._last_gyro,
       'accel': self._last_accel,
-      'debug': debug,
     }
 
   def _get_depth_columns(self) -> dict | None:
@@ -597,6 +686,7 @@ class _DepthMixin:
     return False
 
   def _close_depth(self):
+    self._stop_direct_imu()
     if self._occ_web is not None:
       self._occ_web.stop()
       self._occ_web = None
@@ -648,25 +738,11 @@ if TICI:
     def _update_state(self):
       if self._camera_view:
         self._camera_view._update_state()
-      # Poll IMU independently of depth inference so web UI always has data
+      # Poll SubMaster for livePose/liveCalibration (used by occupancy grid).
+      # IMU data is read directly from I2C by _imu_poll_loop thread.
       if self._sm is not None:
         try:
           self._sm.update(0)
-          if self._sm.recv_frame.get('gyroscope', 0) > 0:
-            gyro = self._sm['gyroscope']
-            # SensorEventData is a union — try both field names
-            w = gyro.which() if hasattr(gyro, 'which') else ''
-            if w == 'gyroUncalibrated' and len(gyro.gyroUncalibrated.v) > 2:
-              self._last_gyro = [float(gyro.gyroUncalibrated.v[i]) for i in range(3)]
-            elif w == 'gyro' and len(gyro.gyro.v) > 2:
-              self._last_gyro = [float(gyro.gyro.v[i]) for i in range(3)]
-          if self._sm.recv_frame.get('accelerometer', 0) > 0:
-            accel = self._sm['accelerometer']
-            w = accel.which() if hasattr(accel, 'which') else ''
-            if w == 'acceleration' and len(accel.acceleration.v) >= 3:
-              self._last_accel = [float(accel.acceleration.v[i]) for i in range(3)]
-        except Exception:
-          pass
         except Exception:
           pass
       super()._update_state()
