@@ -328,8 +328,8 @@ class _DepthMixin:
       # Fallback: raw gyroscope for yaw (reliable)
       elif sm.recv_frame.get('gyroscope', 0) > 0:
         gyro = sm['gyroscope']
-        if hasattr(gyro, 'gyro') and len(gyro.gyro.v) > 2:
-          yaw_rate = gyro.gyro.v[2]
+        if hasattr(gyro, 'gyroUncalibrated') and len(gyro.gyroUncalibrated.v) > 2:
+          yaw_rate = gyro.gyroUncalibrated.v[2]
           dyaw = yaw_rate * dt
 
       # Update camera height from calibration
@@ -638,8 +638,8 @@ if TICI:
           self._sm.update(0)
           if self._sm.recv_frame.get('gyroscope', 0) > 0:
             gyro = self._sm['gyroscope']
-            if hasattr(gyro, 'gyro') and len(gyro.gyro.v) > 2:
-              self._last_gyro = [float(gyro.gyro.v[i]) for i in range(3)]
+            if hasattr(gyro, 'gyroUncalibrated') and len(gyro.gyroUncalibrated.v) > 2:
+              self._last_gyro = [float(gyro.gyroUncalibrated.v[i]) for i in range(3)]
           if self._sm.recv_frame.get('accelerometer', 0) > 0:
             accel = self._sm['accelerometer']
             if hasattr(accel, 'acceleration') and len(accel.acceleration.v) >= 3:
