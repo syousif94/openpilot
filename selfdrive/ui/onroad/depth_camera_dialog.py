@@ -631,6 +631,7 @@ if TICI:
       super().hide_event()
       ui_state.params.put_bool("IsDriverViewEnabled", False)
       device.set_override_interactive_timeout(None)
+      self.close()
 
     def _handle_mouse_release(self, pos):
       self._probe_at_screen(pos.x, pos.y)
@@ -641,6 +642,20 @@ if TICI:
     def _update_state(self):
       if self._camera_view:
         self._camera_view._update_state()
+      # Poll IMU independently of depth inference so web UI always has data
+      if self._sm is not None:
+        try:
+          self._sm.update(0)
+          if self._sm.recv_frame.get('gyroscope', 0) > 0:
+            gyro = self._sm['gyroscope']
+            if hasattr(gyro, 'gyro') and len(gyro.gyro.v) > 2:
+              self._last_gyro = [float(gyro.gyro.v[i]) for i in range(3)]
+          if self._sm.recv_frame.get('accelerometer', 0) > 0:
+            accel = self._sm['accelerometer']
+            if hasattr(accel, 'acceleration') and len(accel.acceleration.v) >= 3:
+              self._last_accel = [float(accel.acceleration.v[i]) for i in range(3)]
+        except Exception:
+          pass
       super()._update_state()
 
     def _render(self, rect):
