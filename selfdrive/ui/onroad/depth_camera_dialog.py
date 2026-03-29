@@ -14,7 +14,6 @@ Before use, export the model:
   python selfdrive/depthd/export_depth_model.py   (Mac, needs torch)
 """
 import os
-import sys
 import time
 import threading
 import numpy as np
@@ -23,9 +22,6 @@ import pyray as rl
 from openpilot.system.hardware import TICI
 
 if TICI:
-  # onnxruntime installed to /data/onnxrt on device
-  if '/data/onnxrt' not in sys.path:
-    sys.path.insert(0, '/data/onnxrt')
   from msgq.visionipc import VisionStreamType
   from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
   from openpilot.system.ui.widgets.nav_widget import NavWidget
