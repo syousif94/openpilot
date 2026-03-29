@@ -91,33 +91,41 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   #imu-panel .axis { color: #888; margin-right: 2px; }
   #imu-panel .val { color: #0ff; font-weight: bold; margin-right: 8px; }
   canvas { display: block; width: 100vw; height: 100vh; }
-  #depth-cam-wrapper {
-    position: absolute; top: 110px; right: 16px; z-index: 10;
-    background: rgba(0,0,0,0.65); border-radius: 8px; padding: 6px;
-    backdrop-filter: blur(4px); pointer-events: none;
+  #container { display: flex; flex-direction: column; width: 100vw; height: 100vh; }
+  #cam-section {
+    flex: 0 0 55%; position: relative; background: #111;
+    display: flex; justify-content: center; align-items: center;
+    overflow: hidden;
   }
-  #depth-cam { display: none; border-radius: 4px; width: 240px; }
-  #cam-placeholder { color: #555; font-size: 11px; padding: 4px; }
-  #status { position: absolute; bottom: 12px; right: 16px; font-size: 11px; color: #666; z-index: 10; }
+  #depth-cam { max-width: 100%; max-height: 100%; object-fit: contain; display: none; }
+  #cam-placeholder { color: #555; font-size: 16px; position: absolute; }
+  #chart-section { flex: 1; position: relative; min-height: 0; overflow: hidden; }
+  #status { position: absolute; bottom: 4px; right: 8px; font-size: 11px; color: #666; z-index: 10; }
 </style>
 </head>
 <body>
-<div id="hud">
-  <div>Depth Profile <b>LIVE</b></div>
-  <div id="info">connecting…</div>
+<div id="container">
+  <div id="cam-section">
+    <img id="depth-cam" alt="Depth Camera">
+    <div id="cam-placeholder">Waiting for depth frames…</div>
+    <div id="hud">
+      <div>Depth Profile <b>LIVE</b></div>
+      <div id="info">connecting…</div>
+    </div>
+    <div id="imu-panel">
+      <div class="label">orientation (°)</div>
+      <div><span class="axis">Y</span><span class="val" id="yaw">—</span> <span class="axis">P</span><span class="val" id="pitch">—</span> <span class="axis">R</span><span class="val" id="roll">—</span></div>
+      <div class="label" style="margin-top:4px">gyro (rad/s)</div>
+      <div><span class="axis">X</span><span class="val" id="gx">—</span> <span class="axis">Y</span><span class="val" id="gy">—</span> <span class="axis">Z</span><span class="val" id="gz">—</span></div>
+      <div class="label" style="margin-top:4px">accel (m/s²)</div>
+      <div><span class="axis">X</span><span class="val" id="ax">—</span> <span class="axis">Y</span><span class="val" id="ay">—</span> <span class="axis">Z</span><span class="val" id="az">—</span></div>
+    </div>
+  </div>
+  <div id="chart-section">
+    <canvas id="c"></canvas>
+    <div id="status"></div>
+  </div>
 </div>
-<div id="imu-panel">
-  <div class="label">gyro (rad/s)</div>
-  <div><span class="axis">X</span><span class="val" id="gx">—</span> <span class="axis">Y</span><span class="val" id="gy">—</span> <span class="axis">Z</span><span class="val" id="gz">—</span></div>
-  <div class="label" style="margin-top:4px">accel (m/s²)</div>
-  <div><span class="axis">X</span><span class="val" id="ax">—</span> <span class="axis">Y</span><span class="val" id="ay">—</span> <span class="axis">Z</span><span class="val" id="az">—</span></div>
-</div>
-<div id="depth-cam-wrapper">
-  <img id="depth-cam" alt="Depth Camera">
-  <div id="cam-placeholder">Waiting for depth frames…</div>
-</div>
-<div id="status"></div>
-<canvas id="c"></canvas>
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -295,8 +303,9 @@ function updateDeadReckoning(gyro, accel) {
 }
 
 function resize() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  const section = document.getElementById('chart-section');
+  canvas.width = section.clientWidth;
+  canvas.height = section.clientHeight;
 }
 window.addEventListener('resize', resize);
 resize();
@@ -571,6 +580,15 @@ async function fetchData() {
 
     const g = imu.gyro;
     const a = imu.accel;
+    // Madgwick Euler angles
+    if (calibrated) {
+      const yDeg = ((getYaw() * 180 / Math.PI) % 360 + 360) % 360;
+      const pDeg = getPitch() * 180 / Math.PI;
+      const rDeg = getRoll() * 180 / Math.PI;
+      document.getElementById('yaw').textContent = yDeg.toFixed(1);
+      document.getElementById('pitch').textContent = pDeg.toFixed(1);
+      document.getElementById('roll').textContent = rDeg.toFixed(1);
+    }
     document.getElementById('gx').textContent = g[0].toFixed(3);
     document.getElementById('gy').textContent = g[1].toFixed(3);
     document.getElementById('gz').textContent = g[2].toFixed(3);
