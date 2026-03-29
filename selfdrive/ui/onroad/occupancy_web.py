@@ -70,7 +70,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Occupancy Grid — openpilot</title>
+<title>Depth Profile — openpilot</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #0a0a0a; color: #eee; font-family: 'SF Mono', 'Fira Code', monospace; overflow: hidden; }
@@ -95,14 +95,12 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
 <div id="hud">
-  <div>Occupancy Grid <b>LIVE</b></div>
+  <div>Depth Profile <b>LIVE</b></div>
   <div id="info">connecting…</div>
 </div>
 <div id="imu-panel">
   <div><span class="label">gyro:</span> <span class="val" id="gyro-val">—</span></div>
   <div><span class="label">accel:</span> <span class="val" id="accel-val">—</span></div>
-  <div><span class="label">yaw:</span> <span class="val" id="yaw-val">—</span></div>
-  <div><span class="label">pos:</span> <span class="val" id="pos-val">—</span></div>
 </div>
 <div id="status"></div>
 <canvas id="c"></canvas>
@@ -112,19 +110,8 @@ const ctx = canvas.getContext('2d');
 const info = document.getElementById('info');
 const status = document.getElementById('status');
 
-const GRID = """ + str(GRID_SIZE) + """;
-const CELL = """ + str(CELL_SIZE) + """;
-const OX = """ + str(ORIGIN_X) + """;
-const OY = """ + str(ORIGIN_Y) + """;
-
-let gridData = null;
-let meta = {};
-let trail = [];
+let depthData = null;
 let imu = { gyro: [0,0,0], accel: [0,0,0] };
-
-// Smooth interpolation targets
-let displayYaw = 0;
-let targetYaw = 0;
 
 function resize() {
   canvas.width = window.innerWidth;
@@ -133,242 +120,151 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-function cellColor(prob) {
-  if (prob < 0.35) {
-    const t = prob / 0.35;
-    return `rgb(${Math.round(5 + t * 15)},${Math.round(15 + t * 35)},${Math.round(40 + t * 30)})`;
-  } else if (prob < 0.65) {
-    return '#111';
-  } else {
-    const t = (prob - 0.65) / 0.35;
-    const r = Math.round(200 + t * 55);
-    const g = Math.round(100 - t * 80);
-    const b = Math.round(15 + t * 10);
-    return `rgb(${r},${g},${b})`;
-  }
-}
-
-function lerp(a, b, t) { return a + (b - a) * t; }
-
-// Smooth angle interpolation
-function lerpAngle(a, b, t) {
-  let d = b - a;
-  while (d > Math.PI) d -= 2 * Math.PI;
-  while (d < -Math.PI) d += 2 * Math.PI;
-  return a + d * t;
-}
-
 function draw() {
   const W = canvas.width;
   const H = canvas.height;
   ctx.fillStyle = '#0a0a0a';
   ctx.fillRect(0, 0, W, H);
 
-  if (!gridData) {
+  if (!depthData) {
     ctx.fillStyle = '#444';
     ctx.font = '20px monospace';
-    ctx.fillText('Waiting for data...', 40, 60);
+    ctx.fillText('Waiting for depth data...', 40, 60);
     return;
   }
 
-  // Smoothly interpolate yaw
-  displayYaw = lerpAngle(displayYaw, targetYaw, 0.15);
+  const closest = depthData.closest;
+  const farthest = depthData.farthest;
+  const cols = closest.length;
+  if (cols === 0) return;
 
-  const pad = 40;
-  const cellPx = Math.min((W - 2*pad) / GRID, (H - 2*pad) / GRID);
-  const gridPx = GRID * cellPx;
-  const centerX = W / 2;
-  const centerY = H / 2;
-
-  // Ego position in grid pixel space (before rotation)
-  const egoGx = OX;
-  const egoGy = OY;
-
-  ctx.save();
-  // Move canvas center to screen center, rotate around ego
-  ctx.translate(centerX, centerY);
-  ctx.rotate(-displayYaw);  // rotate grid so device heading is always "up"
-
-  // Offset so ego cell is at origin
-  const gridOffX = -egoGy * cellPx - cellPx/2;
-  const gridOffY = (egoGx - GRID + 1) * cellPx + cellPx/2;
-
-  // Draw grid cells
-  for (let gx = 0; gx < GRID; gx++) {
-    for (let gy = 0; gy < GRID; gy++) {
-      const idx = gx * GRID + gy;
-      const prob = gridData[idx];
-      if (prob > 0.4 && prob < 0.6) continue;
-
-      const screenX = gridOffX + gy * cellPx;
-      const screenY = gridOffY + (GRID - 1 - gx) * cellPx;
-
-      ctx.fillStyle = cellColor(prob);
-      ctx.fillRect(screenX, screenY, cellPx + 0.5, cellPx + 0.5);
-    }
+  // Find global min/max across both lines for Y scaling
+  let gMin = Infinity, gMax = -Infinity;
+  for (let i = 0; i < cols; i++) {
+    if (farthest[i] < gMin) gMin = farthest[i];
+    if (closest[i] > gMax) gMax = closest[i];
   }
+  const range = gMax - gMin || 1;
 
-  // Range rings
-  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  // Chart area
+  const pad = { top: 80, bottom: 50, left: 70, right: 30 };
+  const cw = W - pad.left - pad.right;
+  const ch = H - pad.top - pad.bottom;
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
   ctx.lineWidth = 0.5;
-  for (let r = 2; r <= 10; r += 2) {
-    const rpx = r / CELL * cellPx;
+  const nGridY = 6;
+  for (let i = 0; i <= nGridY; i++) {
+    const y = pad.top + (i / nGridY) * ch;
     ctx.beginPath();
-    ctx.arc(0, 0, rpx, 0, 2*Math.PI);
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + cw, y);
     ctx.stroke();
-    // Label
-    ctx.fillStyle = 'rgba(255,255,255,0.15)';
-    ctx.font = '10px monospace';
-    ctx.fillText(r + 'm', 4, -rpx + 12);
+    const val = gMax - (i / nGridY) * range;
+    ctx.fillStyle = '#555';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(val.toFixed(1), pad.left - 8, y + 4);
   }
 
-  ctx.restore();
-
-  // Draw trail in screen space (world coordinates → screen)
-  if (trail.length > 1) {
-    ctx.save();
-    ctx.translate(centerX, centerY);
-    ctx.rotate(-displayYaw);
-
-    const wx0 = meta.world_x || 0;
-    const wy0 = meta.world_y || 0;
-
-    ctx.beginPath();
-    ctx.strokeStyle = 'rgba(0,255,100,0.4)';
-    ctx.lineWidth = 2;
-    for (let i = 0; i < trail.length; i++) {
-      // Trail points are world coords; convert relative to current ego
-      const relX = trail[i][0] - wx0;  // forward delta
-      const relY = trail[i][1] - wy0;  // left delta
-      // In grid space: relX → up (negative Y on screen), relY → left (negative X)
-      const sx = -relY / CELL * cellPx;
-      const sy = -relX / CELL * cellPx;
-      if (i === 0) ctx.moveTo(sx, sy);
-      else ctx.lineTo(sx, sy);
-    }
-    ctx.stroke();
-
-    // Trail dots
-    for (let i = 0; i < trail.length; i++) {
-      const relX = trail[i][0] - wx0;
-      const relY = trail[i][1] - wy0;
-      const sx = -relY / CELL * cellPx;
-      const sy = -relX / CELL * cellPx;
-      const age = i / trail.length;
-      ctx.fillStyle = `rgba(0,255,100,${0.1 + age * 0.5})`;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 2, 0, 2*Math.PI);
-      ctx.fill();
-    }
-
-    ctx.restore();
-  }
-
-  // Draw ego marker (always at center, always pointing up)
-  ctx.save();
-  ctx.translate(centerX, centerY);
-  const sz = Math.max(cellPx * 4, 12);
-  // Glow
-  ctx.shadowColor = '#0f0';
-  ctx.shadowBlur = 15;
-  ctx.fillStyle = '#0f0';
-  ctx.beginPath();
-  ctx.moveTo(0, -sz);
-  ctx.lineTo(-sz * 0.5, sz * 0.3);
-  ctx.lineTo(0, sz * 0.1);
-  ctx.lineTo(sz * 0.5, sz * 0.3);
-  ctx.closePath();
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  // Outline
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.restore();
-
-  // Scale info
+  // X axis labels
   ctx.fillStyle = '#555';
-  ctx.font = '12px monospace';
-  const mPerGrid = (GRID * CELL).toFixed(0);
-  ctx.fillText(`${mPerGrid}m × ${mPerGrid}m | cell=${CELL}m`, 16, H - 16);
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  const nGridX = 8;
+  for (let i = 0; i <= nGridX; i++) {
+    const x = pad.left + (i / nGridX) * cw;
+    const col = Math.round((i / nGridX) * (cols - 1));
+    ctx.fillText(col, x, pad.top + ch + 20);
+    ctx.beginPath();
+    ctx.moveTo(x, pad.top);
+    ctx.lineTo(x, pad.top + ch);
+    ctx.stroke();
+  }
 
-  // IMU visualization: small attitude indicator
-  drawAttitudeIndicator(W - 110, H - 110, 40);
-}
-
-function drawAttitudeIndicator(cx, cy, r) {
-  const gx = imu.gyro[0] || 0;
-  const gy = imu.gyro[1] || 0;
-  const gz = imu.gyro[2] || 0;
-
-  ctx.save();
-  ctx.translate(cx, cy);
-
-  // Background circle
+  // Fill area between the two lines
   ctx.beginPath();
-  ctx.arc(0, 0, r, 0, 2*Math.PI);
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  for (let i = 0; i < cols; i++) {
+    const x = pad.left + (i / (cols - 1)) * cw;
+    const y = pad.top + (1 - (closest[i] - gMin) / range) * ch;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  for (let i = cols - 1; i >= 0; i--) {
+    const x = pad.left + (i / (cols - 1)) * cw;
+    const y = pad.top + (1 - (farthest[i] - gMin) / range) * ch;
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(100, 180, 255, 0.08)';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
 
-  // Gyro activity bars (show rotation rates)
-  const maxRate = 3.0; // rad/s
-  // X = pitch (red)
-  const bh = r * 0.6;
-  ctx.fillStyle = `rgba(255,80,80,${Math.min(1, Math.abs(gx)/maxRate * 0.8 + 0.2)})`;
-  ctx.fillRect(-r + 4, -bh * Math.min(1, gx/maxRate), 6, bh * Math.min(1, Math.abs(gx)/maxRate));
-  // Y = roll (blue)
-  ctx.fillStyle = `rgba(80,80,255,${Math.min(1, Math.abs(gy)/maxRate * 0.8 + 0.2)})`;
-  ctx.fillRect(-r + 14, -bh * Math.min(1, gy/maxRate), 6, bh * Math.min(1, Math.abs(gy)/maxRate));
-  // Z = yaw (green) — arc
+  // Draw farthest line (blue)
   ctx.beginPath();
-  ctx.arc(0, 0, r * 0.75, -Math.PI/2, -Math.PI/2 + Math.min(Math.PI, Math.abs(gz)) * Math.sign(gz));
-  ctx.strokeStyle = `rgba(0,255,0,${Math.min(1, Math.abs(gz)/maxRate * 0.8 + 0.2)})`;
-  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#4488ff';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < cols; i++) {
+    const x = pad.left + (i / (cols - 1)) * cw;
+    const y = pad.top + (1 - (farthest[i] - gMin) / range) * ch;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
   ctx.stroke();
 
-  // Labels
-  ctx.fillStyle = '#888';
-  ctx.font = '9px monospace';
-  ctx.fillText('IMU', -10, r + 14);
+  // Draw closest line (red/orange)
+  ctx.beginPath();
+  ctx.strokeStyle = '#ff6633';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < cols; i++) {
+    const x = pad.left + (i / (cols - 1)) * cw;
+    const y = pad.top + (1 - (closest[i] - gMin) / range) * ch;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
 
+  // Legend
+  const lx = pad.left + 10;
+  const ly = pad.top + 20;
+  ctx.font = '13px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ff6633';
+  ctx.fillRect(lx, ly - 8, 16, 3);
+  ctx.fillText('closest', lx + 22, ly);
+  ctx.fillStyle = '#4488ff';
+  ctx.fillRect(lx, ly + 14, 16, 3);
+  ctx.fillText('farthest', lx + 22, ly + 22);
+
+  // Axis labels
+  ctx.fillStyle = '#888';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('pixel column', pad.left + cw / 2, H - 10);
+  ctx.save();
+  ctx.translate(14, pad.top + ch / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('inverse depth (MiDaS)', 0, 0);
   ctx.restore();
 }
 
-async function fetchGrid() {
+async function fetchData() {
   try {
     const resp = await fetch('/grid.json');
     if (!resp.ok) throw new Error(resp.statusText);
     const obj = await resp.json();
-    meta = obj.meta;
-    trail = obj.trail || [];
     if (obj.imu) imu = obj.imu;
+    if (obj.depth) depthData = obj.depth;
 
-    gridData = new Float32Array(obj.grid.length);
-    for (let i = 0; i < obj.grid.length; i++) {
-      gridData[i] = 1.0 / (1.0 + Math.exp(-obj.grid[i]));
-    }
-
-    targetYaw = meta.world_yaw || 0;
-
-    info.innerHTML = `frames: <b>${meta.frame_count}</b> | ` +
-      `pose: (${meta.world_x.toFixed(2)}, ${meta.world_y.toFixed(2)}) yaw=${(meta.world_yaw * 180/Math.PI).toFixed(1)}°`;
-
-    // Update IMU readouts
     const g = imu.gyro;
     const a = imu.accel;
     document.getElementById('gyro-val').textContent =
-      `${g[0].toFixed(2)} ${g[1].toFixed(2)} ${g[2].toFixed(2)}`;
+      g[0].toFixed(2) + ' ' + g[1].toFixed(2) + ' ' + g[2].toFixed(2);
     document.getElementById('accel-val').textContent =
-      `${a[0].toFixed(1)} ${a[1].toFixed(1)} ${a[2].toFixed(1)}`;
-    document.getElementById('yaw-val').textContent =
-      `${(meta.world_yaw * 180/Math.PI).toFixed(1)}°`;
-    document.getElementById('pos-val').textContent =
-      `${meta.world_x.toFixed(2)}, ${meta.world_y.toFixed(2)}`;
+      a[0].toFixed(1) + ' ' + a[1].toFixed(1) + ' ' + a[2].toFixed(1);
 
-    lastFetch = performance.now();
+    const cols = depthData ? depthData.closest.length : 0;
+    info.innerHTML = 'columns: <b>' + cols + '</b>';
   } catch(e) {
     status.textContent = 'fetch error: ' + e.message;
   }
@@ -379,8 +275,8 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
-setInterval(fetchGrid, 150);  // ~7 Hz
-fetchGrid();
+setInterval(fetchData, 150);
+fetchData();
 loop();
 </script>
 </body>
@@ -392,6 +288,7 @@ class _GridHandler(BaseHTTPRequestHandler):
 
   grid: OccupancyGrid | None = None  # set externally before starting server
   get_imu = None  # callback: () -> dict with gyro/accel, set externally
+  get_depth = None  # callback: () -> dict with closest/farthest columns, set externally
 
   def log_message(self, fmt, *args):
     pass  # suppress access logs
@@ -434,6 +331,12 @@ class _GridHandler(BaseHTTPRequestHandler):
     get_imu = self.__class__.get_imu
     if get_imu:
       obj['imu'] = get_imu()
+    # Add depth column data if available
+    get_depth = self.__class__.get_depth
+    if get_depth:
+      depth = get_depth()
+      if depth:
+        obj['depth'] = depth
     data = json.dumps(obj).encode('utf-8')
     self.send_response(200)
     self.send_header('Content-Type', 'application/json')
@@ -460,16 +363,18 @@ class _GridHandler(BaseHTTPRequestHandler):
 class OccupancyWebServer:
   """Manages the HTTP server lifecycle in a background thread."""
 
-  def __init__(self, grid: OccupancyGrid, port: int = WEB_PORT, get_imu=None):
+  def __init__(self, grid: OccupancyGrid, port: int = WEB_PORT, get_imu=None, get_depth=None):
     self._grid = grid
     self._port = port
     self._get_imu = get_imu
+    self._get_depth = get_depth
     self._server: HTTPServer | None = None
     self._thread: threading.Thread | None = None
 
   def start(self):
     _GridHandler.grid = self._grid
     _GridHandler.get_imu = self._get_imu
+    _GridHandler.get_depth = self._get_depth
     self._server = HTTPServer(('0.0.0.0', self._port), _GridHandler)
     self._server.timeout = 1.0
     self._thread = threading.Thread(target=self._run, daemon=True, name='occ-web')

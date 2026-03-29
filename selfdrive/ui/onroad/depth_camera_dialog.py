@@ -201,9 +201,13 @@ class _DepthMixin:
     self._cam_height = DEFAULT_CAM_HEIGHT
     self._cam_intrinsics = _DEFAULT_DCAM_INTRINSICS.copy()
 
+    # Per-column depth data for web UI (closest / farthest per column)
+    self._depth_columns_lock = threading.Lock()
+    self._depth_columns: dict | None = None
+
     if TICI:
       self._occ_grid = OccupancyGrid()
-      self._occ_web = OccupancyWebServer(self._occ_grid, get_imu=self._get_imu_data)
+      self._occ_web = OccupancyWebServer(self._occ_grid, get_imu=self._get_imu_data, get_depth=self._get_depth_columns)
       self._occ_web.start()
       try:
         self._sm = messaging.SubMaster(['livePose', 'liveCalibration', 'accelerometer', 'gyroscope'])
@@ -280,6 +284,11 @@ class _DepthMixin:
       'accel': self._last_accel,
     }
 
+  def _get_depth_columns(self) -> dict | None:
+    """Return per-column closest/farthest depth for the web UI."""
+    with self._depth_columns_lock:
+      return self._depth_columns
+
   def _update_pose(self) -> tuple[float, float, float]:
     """Poll livePose/IMU and return (delta_x, delta_y, delta_yaw) since last call.
 
@@ -302,6 +311,17 @@ class _DepthMixin:
       if dt < 1e-6:
         return dx, dy, dyaw
 
+      # Always read raw gyro/accel for the web UI, regardless of livePose
+      if sm.recv_frame.get('gyroscope', 0) > 0:
+        gyro = sm['gyroscope']
+        if hasattr(gyro, 'gyro') and len(gyro.gyro.v) > 2:
+          self._last_gyro = [float(gyro.gyro.v[i]) for i in range(3)]
+
+      if sm.recv_frame.get('accelerometer', 0) > 0:
+        accel = sm['accelerometer']
+        if hasattr(accel, 'acceleration') and len(accel.acceleration.v) >= 3:
+          self._last_accel = [float(accel.acceleration.v[i]) for i in range(3)]
+
       # Prefer livePose (fused IMU + visual odometry at 20 Hz)
       if sm.recv_frame.get('livePose', 0) > 0 and sm.valid.get('livePose', False):
         pose = sm['livePose']
@@ -315,21 +335,12 @@ class _DepthMixin:
           yaw_rate = pose.angularVelocityDevice.z
           dyaw = yaw_rate * dt
 
-      # Fallback: raw gyroscope for yaw (reliable), raw accel for tilt info
+      # Fallback: raw gyroscope for yaw (reliable)
       elif sm.recv_frame.get('gyroscope', 0) > 0:
         gyro = sm['gyroscope']
         if hasattr(gyro, 'gyro') and len(gyro.gyro.v) > 2:
-          # Z-axis gyro = yaw rate (rotation around vertical axis)
           yaw_rate = gyro.gyro.v[2]
           dyaw = yaw_rate * dt
-
-          # Store raw gyro/accel for web UI visualization
-          self._last_gyro = [float(gyro.gyro.v[i]) for i in range(3)]
-
-        if sm.recv_frame.get('accelerometer', 0) > 0:
-          accel = sm['accelerometer']
-          if hasattr(accel, 'acceleration') and len(accel.acceleration.v) >= 3:
-            self._last_accel = [float(accel.acceleration.v[i]) for i in range(3)]
 
       # Update camera height from calibration
       if sm.recv_frame.get('liveCalibration', 0) > 0:
@@ -381,6 +392,16 @@ class _DepthMixin:
       depth_norm = 1.0 - np.clip((inv_depth - self._depth_min) / rng, 0.0, 1.0)
       depth_u8 = (depth_norm * 255).astype(np.uint8)
       rgba = np.ascontiguousarray(COLORMAP_LUT[depth_u8][:, ::-1])
+
+      # Compute per-column closest/farthest for web UI
+      col_closest = inv_depth.max(axis=0).tolist()   # max inv_depth = closest
+      col_farthest = inv_depth.min(axis=0).tolist()  # min inv_depth = farthest
+      with self._depth_columns_lock:
+        self._depth_columns = {
+          'closest': [round(v, 2) for v in col_closest],
+          'farthest': [round(v, 2) for v in col_farthest],
+          'width': inv_depth.shape[1],
+        }
 
       with self._depth_lock:
         self._depth_rgba = rgba
