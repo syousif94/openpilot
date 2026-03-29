@@ -279,9 +279,21 @@ class _DepthMixin:
 
   def _get_imu_data(self) -> dict:
     """Return latest IMU readings for the web UI."""
+    debug = {}
+    if self._sm is not None:
+      debug['recv_frames'] = {k: self._sm.recv_frame.get(k, 0) for k in ['gyroscope', 'accelerometer', 'livePose', 'liveCalibration']}
+      debug['valid'] = {k: self._sm.valid.get(k, False) for k in ['gyroscope', 'accelerometer', 'livePose', 'liveCalibration']}
+      # Inspect gyro message structure
+      try:
+        gyro_msg = self._sm['gyroscope']
+        debug['gyro_which'] = str(gyro_msg.which()) if hasattr(gyro_msg, 'which') else 'no_which'
+        debug['gyro_dir'] = [a for a in dir(gyro_msg) if not a.startswith('_')][:20]
+      except Exception as e:
+        debug['gyro_err'] = str(e)
     return {
       'gyro': self._last_gyro,
       'accel': self._last_accel,
+      'debug': debug,
     }
 
   def _get_depth_columns(self) -> dict | None:
@@ -328,8 +340,12 @@ class _DepthMixin:
       # Fallback: raw gyroscope for yaw (reliable)
       elif sm.recv_frame.get('gyroscope', 0) > 0:
         gyro = sm['gyroscope']
-        if hasattr(gyro, 'gyroUncalibrated') and len(gyro.gyroUncalibrated.v) > 2:
+        w = gyro.which() if hasattr(gyro, 'which') else ''
+        if w == 'gyroUncalibrated' and len(gyro.gyroUncalibrated.v) > 2:
           yaw_rate = gyro.gyroUncalibrated.v[2]
+          dyaw = yaw_rate * dt
+        elif w == 'gyro' and len(gyro.gyro.v) > 2:
+          yaw_rate = gyro.gyro.v[2]
           dyaw = yaw_rate * dt
 
       # Update camera height from calibration
@@ -638,12 +654,19 @@ if TICI:
           self._sm.update(0)
           if self._sm.recv_frame.get('gyroscope', 0) > 0:
             gyro = self._sm['gyroscope']
-            if hasattr(gyro, 'gyroUncalibrated') and len(gyro.gyroUncalibrated.v) > 2:
+            # SensorEventData is a union — try both field names
+            w = gyro.which() if hasattr(gyro, 'which') else ''
+            if w == 'gyroUncalibrated' and len(gyro.gyroUncalibrated.v) > 2:
               self._last_gyro = [float(gyro.gyroUncalibrated.v[i]) for i in range(3)]
+            elif w == 'gyro' and len(gyro.gyro.v) > 2:
+              self._last_gyro = [float(gyro.gyro.v[i]) for i in range(3)]
           if self._sm.recv_frame.get('accelerometer', 0) > 0:
             accel = self._sm['accelerometer']
-            if hasattr(accel, 'acceleration') and len(accel.acceleration.v) >= 3:
+            w = accel.which() if hasattr(accel, 'which') else ''
+            if w == 'acceleration' and len(accel.acceleration.v) >= 3:
               self._last_accel = [float(accel.acceleration.v[i]) for i in range(3)]
+        except Exception:
+          pass
         except Exception:
           pass
       super()._update_state()
