@@ -119,6 +119,9 @@ let drX = 0, drY = 0;      // world-frame position (m)
 let drVx = 0, drVy = 0;    // world-frame velocity (m/s)
 let drPath = [{x:0, y:0}]; // accumulated trail
 let lastDRTime = null;
+// Gravity estimator: running average of accel (converges to gravity when stationary)
+let gravX = 0, gravY = 0, gravZ = 9.81;
+let gravInit = false;
 
 function updateDeadReckoning(gyro, accel) {
   const now = performance.now() / 1000;
@@ -130,19 +133,35 @@ function updateDeadReckoning(gyro, accel) {
   // Heading from gyro Z (yaw rate)
   drHeading += gyro[2] * dt;
 
-  // Horizontal accel in device frame (ignore Z — mostly gravity)
-  const ax = accel[0];
-  const ay = accel[1];
+  // Estimate gravity via low-pass filter on raw accel
+  // (accurate when device is mostly stationary or moving at constant velocity)
+  const gAlpha = gravInit ? 0.01 : 0.5;  // fast init, then slow tracking
+  gravX += gAlpha * (accel[0] - gravX);
+  gravY += gAlpha * (accel[1] - gravY);
+  gravZ += gAlpha * (accel[2] - gravZ);
+  gravInit = true;
+
+  // Linear acceleration = raw - gravity estimate
+  let lax = accel[0] - gravX;
+  let lay = accel[1] - gravY;
+
+  // Noise gate: ignore tiny accelerations (sensor noise)
+  const linMag = Math.sqrt(lax * lax + lay * lay);
+  if (linMag < 0.15) { lax = 0; lay = 0; }
 
   // Rotate to world frame by current heading
   const ch = Math.cos(drHeading), sh = Math.sin(drHeading);
-  const wax = ax * ch - ay * sh;
-  const way = ax * sh + ay * ch;
+  const wax = lax * ch - lay * sh;
+  const way = lax * sh + lay * ch;
 
-  // Integrate velocity with exponential decay to limit drift
-  const decay = Math.exp(-0.3 * dt);
+  // Integrate velocity with strong decay (ZUPT-like damping)
+  const decay = Math.exp(-3.0 * dt);
   drVx = drVx * decay + wax * dt;
   drVy = drVy * decay + way * dt;
+
+  // Zero velocity when speed is negligible
+  const speed = Math.sqrt(drVx * drVx + drVy * drVy);
+  if (speed < 0.01) { drVx = 0; drVy = 0; }
 
   // Integrate position
   drX += drVx * dt;
@@ -294,7 +313,7 @@ function drawMinimap() {
   if (drPath.length < 2) return;
 
   const mW = 200, mH = 200;
-  const mx = 16, my = canvas.height - mH - 30;
+  const mx = canvas.width - mW - 16, my = canvas.height - mH - 30;
 
   // Background
   ctx.fillStyle = 'rgba(0,0,0,0.7)';
@@ -347,18 +366,37 @@ function drawMinimap() {
   const lx = mx + mW / 2 + (last.x - cenX) * scale;
   const ly = my + mH / 2 - (last.y - cenY) * scale;
   ctx.beginPath();
-  ctx.arc(lx, ly, 4, 0, Math.PI * 2);
+  ctx.arc(lx, ly, 5, 0, Math.PI * 2);
   ctx.fillStyle = '#0f0';
   ctx.fill();
 
-  // Heading indicator (small line from dot)
-  const hLen = 10;
+  // Bearing triangle (shows device facing direction)
+  const hLen = 14;
+  const tipX = lx + Math.sin(drHeading) * hLen;
+  const tipY = ly - Math.cos(drHeading) * hLen;
+  const baseAng = 2.5;  // half-angle of triangle base (radians)
+  const baseLen = 6;
+  const b1x = lx + Math.sin(drHeading + baseAng) * baseLen;
+  const b1y = ly - Math.cos(drHeading + baseAng) * baseLen;
+  const b2x = lx + Math.sin(drHeading - baseAng) * baseLen;
+  const b2y = ly - Math.cos(drHeading - baseAng) * baseLen;
   ctx.beginPath();
-  ctx.moveTo(lx, ly);
-  ctx.lineTo(lx + Math.sin(drHeading) * hLen, ly - Math.cos(drHeading) * hLen);
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(b1x, b1y);
+  ctx.lineTo(b2x, b2y);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0,255,0,0.6)';
+  ctx.fill();
   ctx.strokeStyle = '#0f0';
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 1;
   ctx.stroke();
+
+  // Bearing reading (degrees, 0=north/forward, CW positive)
+  const bearDeg = ((drHeading * 180 / Math.PI) % 360 + 360) % 360;
+  ctx.fillStyle = '#0f0';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(bearDeg.toFixed(0) + '\u00b0', mx + mW - 6, my + 14);
 
   // ── Scale bar ──
   const barMaxPx = mW * 0.4;
